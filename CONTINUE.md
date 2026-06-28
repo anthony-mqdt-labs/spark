@@ -88,10 +88,19 @@ lived in a throwaway `SPARK_HOME`).
 - `uv tool list` · `uv tool upgrade spark` · `uv tool uninstall spark`
 
 ## Optional loose ends (none blocking)
-- **Live-verify mlx_vlm / omlx / ollama adapters** — logic done + unit-tested; only
-  mlx_lm and llama_cpp proven with a real served model so far. Suggested smoke models:
-  mlx_vlm `mlx-community/Qwen2-VL-2B-Instruct-4bit`; omlx any mlx-community 4bit repo;
-  ollama needs the daemon running (`ollama serve`) then a tag like `llama3.2:1b`.
+- **Live-verify mlx_vlm / omlx adapters** — logic done + unit-tested; mlx_lm,
+  llama_cpp, and now **ollama** proven with a real served model. Remaining smoke
+  models: mlx_vlm `mlx-community/Qwen2-VL-2B-Instruct-4bit`; omlx any mlx-community
+  4bit repo.
+  - **ollama — DONE (live-verified 2026-06-28)**. Registered an isolated SPARK_HOME
+    entry (`backend=ollama`, `launch_overrides.ollama_tag=qwen3.5:0.8b-mlx`, the
+    smallest already-cached tag), ran `spark run`. Verified: preflight (disk gate) →
+    `prepare()` daemon health check + tag-present (no pull) → **attach-mode** to the
+    running daemon at `:11434/v1` (never spawned/killed it) → real OpenAI chat
+    completion (`PONG`) → graceful SIGINT (`attached → signal_received → detached`).
+    No code change needed. NB: qwen3.5:0.8b-mlx is a *thinking* model — empty
+    `content` at low `max_tokens` (burns the budget on `reasoning`); needs ~512 tok.
+    NB: spark telemetry lands in `$SPARK_HOME/data/logs/{cli,probe,supervisor}/`.
 - ~~**hermes/pi provider command templates**~~ — DONE (commit 29a8717). Corrected to
   each CLI's real one-shot interface: hermes `-z/--oneshot {prompt}` (live-verified,
   clean JSON, exit 0); pi `-p/--print {prompt}` text mode + raw_json. Both now
