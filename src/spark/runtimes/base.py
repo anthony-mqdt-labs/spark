@@ -32,7 +32,8 @@ def _fill(token: str, ctx: dict[str, object]) -> str:
             f"Unknown placeholder {exc} in launch template token {token!r}.",
             code="CFG_INVALID",
             remediation=[
-                "Valid placeholders: {model_path}, {model_id}, {host}, {port}.",
+                "Valid placeholders: {model_path}, {model_dir}, {model_id}, "
+                "{host}, {port}.",
             ],
         ) from exc
 
@@ -77,12 +78,19 @@ class Backend:
         ref = entry.path or entry.hf_repo or entry.id
         return ref
 
+    def resolve_model_dir(self, entry: ModelEntry) -> str:
+        """Directory handed to runtimes that serve a *directory* of models (only
+        ``{model_dir}`` templates use this). Default empty; staged by
+        :meth:`prepare` in backends that need it (e.g. oMLX)."""
+        return ""
+
     # -- launch ----------------------------------------------------------------
     def build_launch_cmd(
         self, entry: ModelEntry, host: str, port: int
     ) -> list[str]:
         ctx: dict[str, object] = {
             "model_path": self.resolve_model_ref(entry),
+            "model_dir": self.resolve_model_dir(entry),
             "model_id": entry.id,
             "host": host,
             "port": port,

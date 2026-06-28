@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from spark.config.loader import load_config
@@ -95,6 +97,46 @@ def test_select_falls_back_to_preference_order():
     chosen = select_backend_for(entry, cfg, ["llama_cpp", "mlx_lm", "omlx"])
     # mlx_lm beats llama_cpp/omlx in preference and is format-compatible
     assert chosen == "mlx_lm"
+
+
+def test_omlx_cmd_uses_staged_model_dir(monkeypatch, tmp_path):
+    # oMLX serves a directory of models, not a single positional model.
+    monkeypatch.setenv("SPARK_HOME", str(tmp_path))
+    cfg = load_config()
+    b = get_backend("omlx", cfg)
+    entry = ModelEntry(id="q05", model_format="mlx", path="/models/q05")
+    cmd = b.build_launch_cmd(entry, "127.0.0.1", 8083)
+    assert cmd[0] == "omlx" and cmd[1] == "serve"
+    i = cmd.index("--model-dir")
+    assert cmd[i + 1].endswith("/run/omlx/q05")  # private per-model staging dir
+    assert "--memory-guard" in cmd and "safe" in cmd
+    assert "127.0.0.1" in cmd and "8083" in cmd
+    assert "/models/q05" not in cmd  # the old positional form is gone
+
+
+def test_omlx_prepare_stages_one_model_symlink(monkeypatch, tmp_path):
+    monkeypatch.setenv("SPARK_HOME", str(tmp_path))
+    src = tmp_path / "weights"
+    src.mkdir()
+    (src / "config.json").write_text("{}")  # oMLX's model-dir marker
+    cfg = load_config()
+    b = get_backend("omlx", cfg)
+    entry = ModelEntry(id="q05", model_format="mlx", path=str(src))
+    b.prepare(entry)
+    link = Path(b.resolve_model_dir(entry)) / "q05"
+    assert link.is_symlink() and link.resolve() == src.resolve()
+
+
+def test_omlx_prepare_aborts_without_local_weights(monkeypatch, tmp_path):
+    from spark.errors import RuntimeBackendError
+
+    monkeypatch.setenv("SPARK_HOME", str(tmp_path))
+    monkeypatch.setenv("HF_HOME", str(tmp_path / "hf"))  # isolate from real cache
+    cfg = load_config()
+    b = get_backend("omlx", cfg)
+    entry = ModelEntry(id="nope", model_format="mlx", hf_repo="org/not-cached-xyz")
+    with pytest.raises(RuntimeBackendError):
+        b.prepare(entry)
 
 
 def test_select_raises_when_nothing_available():

@@ -12,9 +12,12 @@ version_args = ["--version"]
 
 [server]
 binary = "omlx"
-# `omlx serve <model> --host --port`; --memory-guard safe respects the 16 GB box.
+# oMLX >=0.4 `serve` discovers models from subdirs of --model-dir (no positional/
+# single-model form). spark stages a private one-model dir (see runtimes/omlx.py)
+# and points --model-dir at it; --memory-guard safe respects the 16 GB box.
 args_template = [
-    "serve", "{model_path}",
+    "serve",
+    "--model-dir", "{model_dir}",
     "--host", "{host}",
     "--port", "{port}",
     "--memory-guard", "safe",
