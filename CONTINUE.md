@@ -137,9 +137,12 @@ lived in a throwaway `SPARK_HOME`).
   `prompt_via=arg`. Note: pi's configured backend is local **ollama** (`defaultProvider`
   in `~/.pi/agent/settings.json`), currently down — pi research only works when that
   daemon is up; spark owns pi's flags, not pi's backend auth.
-- **Distribution beyond this host**: `uv build` a wheel / publish if spark should run
-  on machines without the repo checked out (editable install needs the repo present).
-- **Git**: repo initialized, no commits yet (awaiting operator go-ahead).
+- ~~**Distribution beyond this host**~~ — **DECIDED: NO (2026-06-28).** spark is
+  local-only; never package/publish. The editable install (`uv tool install
+  --editable`) + repo checkout IS the deployment model. Don't propose wheels/PyPI.
+  Only reinstall trigger is a pyproject dep change (`--reinstall`).
+- ~~**Git**: no commits~~ — DONE. 17 commits on `main`, clean history (scaffold →
+  per-module → fixes). No remote; nothing pushed (intentional, local-only).
 - **Tune `mlx_lm.server` chat-template / sampling defaults** per-model via research
   `launch_overrides` once more models are registered.
 
