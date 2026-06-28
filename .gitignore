@@ -1,0 +1,27 @@
+# Python / uv
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+dist/
+build/
+
+# spark runtime state (never commit local model/config/secret artifacts)
+logs/
+.spark/
+*.log
+
+# OS
+.DS_Store
+
+# Secrets must never be committed. Secrets live in the macOS Keychain, never in
+# the repo. This is a belt-and-suspenders guard against accidental key files.
+*.key
+*.pem
+*.token
+secrets.toml
+.env
+.env.*
