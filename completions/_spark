@@ -1,0 +1,44 @@
+#compdef spark
+# spark zsh completion (native compsys; fzf-tab compatible).
+# Install: spark completion zsh > "${fpath[1]}/_spark" && compinit
+# Fuzzy preview (with fzf-tab):
+#   zstyle ':fzf-tab:complete:spark:*' fzf-preview 'spark __complete describe $word'
+
+_spark() {
+  local -a subcmds
+  subcmds=(
+    'run:Launch the optimal runtime for a model'
+    'download:Download + register a Hugging Face model'
+    'research:Research optimal config for a registered model'
+    'doctor:Probe host capabilities and runtimes'
+    'list:List registered models'
+    'secret:Manage secrets (macOS Keychain)'
+    'config:Inspect and validate configuration'
+    'completion:Emit shell completion'
+  )
+
+  local -a models
+  local id desc
+  while IFS=$'\t' read -r id desc; do
+    [[ -n "$id" ]] && models+=("${id}:${desc}")
+  done < <(command spark __complete models 2>/dev/null)
+
+  if (( CURRENT == 2 )); then
+    _describe -t commands 'spark command' subcmds
+    _describe -t models 'model' models
+    return
+  fi
+
+  case "${words[2]}" in
+    run|download|research)
+      _describe -t models 'model' models ;;
+    secret)
+      _values 'secret command' set ls rm get ;;
+    config)
+      _values 'config command' validate path show review import ;;
+    completion)
+      _values 'shell' zsh ;;
+  esac
+}
+
+_spark "$@"
