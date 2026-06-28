@@ -117,8 +117,11 @@ lived in a throwaway `SPARK_HOME`).
       them the server starts but model-load 500s ("Qwen2VLVideoProcessor requires the
       Torchvision library"). Fixed once on this host:
       `uv tool install mlx-vlm --with torch --with torchvision` (torch 2.12.1,
-      torchvision 0.27.1). Worth surfacing in `spark doctor` as a mlx_vlm readiness
-      check.
+      torchvision 0.27.1). **Now surfaced in `spark doctor`** (commit 09c9b1c):
+      runtimes declare `[detect].python_requires` in their TOML; doctor resolves the
+      runtime's OWN interpreter (console-script shebang) and find_spec-checks the
+      modules there, printing the `--with` fix if any are missing. Data-driven, so
+      adding a dep check to another runtime is a one-line TOML edit, no code.
   - **ollama — DONE (live-verified 2026-06-28)**. Registered an isolated SPARK_HOME
     entry (`backend=ollama`, `launch_overrides.ollama_tag=qwen3.5:0.8b-mlx`, the
     smallest already-cached tag), ran `spark run`. Verified: preflight (disk gate) →
