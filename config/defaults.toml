@@ -56,20 +56,29 @@ parse = "json_envelope"
 envelope_field = "result"
 timeout_s = 300.0
 
+# hermes one-shot: `-z/--oneshot PROMPT` sends a single prompt and prints ONLY
+# the model's response (no banner, no envelope). Prompt is an argv arg, not stdin.
+# Verified live: clean JSON on stdout, exit 0. raw_json + tolerant extraction.
 [[research.providers]]
 name = "hermes"
 type = "cli"
 detect_binary = "hermes"
-command = ["hermes", "-p"]
-prompt_via = "stdin"
+command = ["hermes", "-z", "{prompt}"]
+prompt_via = "arg"
 parse = "raw_json"
 timeout_s = 300.0
 
+# pi non-interactive: `-p/--print` processes the prompt and exits; the prompt is
+# a positional message arg. Kept in text mode (not `--mode json`) so output is the
+# model's direct response, parsed by the tolerant raw_json extractor — uniform with
+# hermes and independent of pi's json-envelope schema. Requires pi to have a
+# reachable inference backend configured (its `defaultProvider`); spark only owns
+# the invocation flags, not pi's backend auth.
 [[research.providers]]
 name = "pi"
 type = "cli"
 detect_binary = "pi"
-command = ["pi"]
-prompt_via = "stdin"
+command = ["pi", "-p", "{prompt}"]
+prompt_via = "arg"
 parse = "raw_json"
 timeout_s = 300.0
