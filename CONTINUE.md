@@ -92,9 +92,12 @@ lived in a throwaway `SPARK_HOME`).
   mlx_lm and llama_cpp proven with a real served model so far. Suggested smoke models:
   mlx_vlm `mlx-community/Qwen2-VL-2B-Instruct-4bit`; omlx any mlx-community 4bit repo;
   ollama needs the daemon running (`ollama serve`) then a tag like `llama3.2:1b`.
-- **hermes/pi provider command templates** in `config/defaults.toml [[research.providers]]`
-  are best-guess (`-p` + stdin). Only `claude` is verified end-to-end. Confirm each
-  CLI's real flags / how it emits JSON, then fix `command`/`prompt_via`/`parse`.
+- ~~**hermes/pi provider command templates**~~ — DONE (commit 29a8717). Corrected to
+  each CLI's real one-shot interface: hermes `-z/--oneshot {prompt}` (live-verified,
+  clean JSON, exit 0); pi `-p/--print {prompt}` text mode + raw_json. Both now
+  `prompt_via=arg`. Note: pi's configured backend is local **ollama** (`defaultProvider`
+  in `~/.pi/agent/settings.json`), currently down — pi research only works when that
+  daemon is up; spark owns pi's flags, not pi's backend auth.
 - **Distribution beyond this host**: `uv build` a wheel / publish if spark should run
   on machines without the repo checked out (editable install needs the repo present).
 - **Git**: repo initialized, no commits yet (awaiting operator go-ahead).
