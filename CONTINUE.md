@@ -88,10 +88,37 @@ lived in a throwaway `SPARK_HOME`).
 - `uv tool list` · `uv tool upgrade spark` · `uv tool uninstall spark`
 
 ## Optional loose ends (none blocking)
-- **Live-verify mlx_vlm / omlx adapters** — logic done + unit-tested; mlx_lm,
-  llama_cpp, and now **ollama** proven with a real served model. Remaining smoke
-  models: mlx_vlm `mlx-community/Qwen2-VL-2B-Instruct-4bit`; omlx any mlx-community
-  4bit repo.
+- **Live-verify adapters — ALL DONE.** mlx_lm, llama_cpp, **ollama**, **mlx_vlm**,
+  and **omlx** all proven with a real served model + graceful shutdown.
+  - **omlx — DONE + REWORKED (2026-06-28).** Live-verify caught a real bug: spark's
+    template assumed `omlx serve <positional repo>`, but omlx 0.4.4 dropped that —
+    `serve` now only discovers models from subdirs of `--model-dir`. Reworked the
+    adapter (`runtimes/omlx.py`): resolves local weights (`entry.path` from
+    `spark download`, else the HF hub-cache snapshot), stages a private one-model
+    dir under `run_dir/omlx/<id>/` with a symlink named `<id>`, and serves via
+    `--model-dir`. Added a `{model_dir}` placeholder + default `resolve_model_dir`
+    in `base.py`; updated `omlx.toml`; +3 tests (79 total). Verified: HF-cache
+    snapshot resolution → staged symlink → `omlx serve --model-dir …` → model served
+    as clean id `qwen05` → real completion (`PONG!`) → graceful SIGINT/reap. NB: omlx
+    `serve` does NOT auto-fetch — weights must be local first (adapter aborts with
+    remediation otherwise); the bounded-restart path was also exercised (the old
+    broken template surfaced `RUN_RECOVERY_EXHAUSTED` after 4 attempts).
+  - **mlx_vlm — DONE (live-verified 2026-06-28)**. Registered an isolated SPARK_HOME
+    entry (`backend=mlx_vlm`, `model_format=mlx-vlm`,
+    `hf_repo=mlx-community/Qwen2-VL-2B-Instruct-4bit`, ~1.2 GB), ran `spark run`.
+    Verified the **spawn** path (vs ollama attach): memory gate (est 1.1 GiB vs
+    10.4 budget) → disk gate → `secret_env_resolved` (no hf_token, skipped, public
+    model) → `process_start` → `server_ready` on :8081 → real **vision** completion
+    (red PNG in → text out, 127 tok/s, peak 1.32 GiB) → graceful SIGINT
+    (`server_ready → signal_received → shutdown_initiated → process_exit`, child
+    server reaped). No spark code change needed.
+    - **PREREQUISITE (environment, not spark):** mlx_vlm's Qwen2-VL processor needs
+      **PyTorch + Torchvision**, absent from a bare `uv tool install mlx-vlm`. Without
+      them the server starts but model-load 500s ("Qwen2VLVideoProcessor requires the
+      Torchvision library"). Fixed once on this host:
+      `uv tool install mlx-vlm --with torch --with torchvision` (torch 2.12.1,
+      torchvision 0.27.1). Worth surfacing in `spark doctor` as a mlx_vlm readiness
+      check.
   - **ollama — DONE (live-verified 2026-06-28)**. Registered an isolated SPARK_HOME
     entry (`backend=ollama`, `launch_overrides.ollama_tag=qwen3.5:0.8b-mlx`, the
     smallest already-cached tag), ran `spark run`. Verified: preflight (disk gate) →
