@@ -1,0 +1,24 @@
+# MLX-VLM — Apple Silicon native vision-language models. PRIMARY multimodal.
+name = "mlx_vlm"
+description = "MLX-VLM OpenAI-compatible server (Apple Silicon native, vision)."
+model_format = "mlx-vlm"
+requires_os = ["Darwin"]
+requires_arch = ["arm64"]
+install_hint = "uv tool install mlx-vlm"
+
+[detect]
+binary = "mlx_vlm.server"
+version_args = ["--version"]
+
+[server]
+binary = "mlx_vlm.server"
+# NOTE: mlx_vlm.server defaults to host 0.0.0.0 — we pin loopback explicitly.
+args_template = ["--model", "{model_path}", "--host", "{host}", "--port", "{port}"]
+openai_compatible = true
+default_port = 8081
+health_path = "/v1/models"
+ready_timeout_s = 240.0
+
+[server.secret_env]
+HF_TOKEN = "hf_token"
+HUGGING_FACE_HUB_TOKEN = "hf_token"

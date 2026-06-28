@@ -1,0 +1,29 @@
+# vLLM — registered but UNAVAILABLE on Apple Silicon (CUDA/ROCm-oriented; the
+# CPU path offers no benefit on an M-series box). Kept so the registry is complete
+# and so the same config travels to a Linux/CUDA host unchanged.
+name = "vllm"
+description = "vLLM OpenAI-compatible server (CUDA/ROCm; not viable on Apple Silicon)."
+model_format = "safetensors"
+requires_os = ["Linux"]
+requires_arch = ["x86_64", "aarch64"]
+install_hint = "On a CUDA host: uv pip install vllm"
+unavailable_reason = "vLLM has no performant Apple Silicon path; use mlx_lm/llama_cpp here."
+
+[detect]
+binary = "vllm"
+version_args = ["--version"]
+
+[server]
+binary = "vllm"
+args_template = [
+    "serve", "{model_path}",
+    "--host", "{host}",
+    "--port", "{port}",
+]
+openai_compatible = true
+default_port = 8000
+health_path = "/health"
+ready_timeout_s = 300.0
+
+[server.secret_env]
+HF_TOKEN = "hf_token"

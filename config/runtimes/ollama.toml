@@ -1,0 +1,23 @@
+# Ollama — convenience backend. Manages its own model store + daemon.
+# NOTE: ollama uses a long-running daemon and its own model names; spark treats it
+# as a convenience fallback. The "serve" here assumes the daemon model registry.
+name = "ollama"
+description = "Ollama server (convenience backend, own model store)."
+model_format = "ollama"
+requires_os = ["Darwin", "Linux"]
+install_hint = "brew install ollama   (then: ollama serve)"
+
+[detect]
+binary = "ollama"
+version_args = ["--version"]
+
+[server]
+# Ollama serves on its own daemon (default 11434). spark points clients at it
+# rather than spawning per-model; {model_path} here is the ollama model tag.
+binary = "ollama"
+args_template = ["serve"]
+openai_compatible = true
+default_port = 11434
+health_path = "/api/tags"
+ready_timeout_s = 60.0
+attach_if_running = true   # shared daemon: attach, never spawn/kill it

@@ -1,0 +1,28 @@
+# oMLX — production MLX server with LRU memory management. Alt MLX backend.
+name = "omlx"
+description = "oMLX multi-model OpenAI-compatible server (Apple Silicon)."
+model_format = "mlx"
+requires_os = ["Darwin"]
+requires_arch = ["arm64"]
+install_hint = "brew install omlx"
+
+[detect]
+binary = "omlx"
+version_args = ["--version"]
+
+[server]
+binary = "omlx"
+# `omlx serve <model> --host --port`; --memory-guard safe respects the 16 GB box.
+args_template = [
+    "serve", "{model_path}",
+    "--host", "{host}",
+    "--port", "{port}",
+    "--memory-guard", "safe",
+]
+openai_compatible = true
+default_port = 8083
+health_path = "/v1/models"
+ready_timeout_s = 240.0
+
+[server.secret_env]
+HF_TOKEN = "hf_token"

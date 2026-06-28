@@ -1,0 +1,31 @@
+# llama.cpp — GGUF via Metal. Broadest model coverage; #2 backend on this host.
+name = "llama_cpp"
+description = "llama.cpp server (GGUF, Metal-accelerated)."
+model_format = "gguf"
+requires_os = ["Darwin", "Linux"]
+install_hint = "brew install llama.cpp"
+
+[detect]
+binary = "llama-server"
+version_args = ["--version"]
+
+[server]
+binary = "llama-server"
+# -ngl 999 offloads all layers to the Metal GPU; -fa auto enables flash-attn.
+# {ctx} defaults via launch_overrides or model context; 0 = read from model.
+args_template = [
+    "--model", "{model_path}",
+    "--host", "{host}",
+    "--port", "{port}",
+    "--alias", "{model_id}",
+    "-ngl", "999",
+    "-fa", "auto",
+    "--jinja",
+]
+openai_compatible = true
+default_port = 8082
+health_path = "/health"
+ready_timeout_s = 180.0
+
+[server.secret_env]
+HF_TOKEN = "hf_token"

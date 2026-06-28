@@ -1,0 +1,25 @@
+# MLX-LM — Apple Silicon native, unified-memory text generation. PRIMARY backend.
+name = "mlx_lm"
+description = "MLX-LM OpenAI-compatible server (Apple Silicon native, text)."
+model_format = "mlx"
+requires_os = ["Darwin"]
+requires_arch = ["arm64"]
+install_hint = "uv tool install mlx-lm   (or: pipx install mlx-lm)"
+
+[detect]
+binary = "mlx_lm.server"
+version_args = ["--version"]
+
+[server]
+binary = "mlx_lm.server"
+# {model_path}, {host}, {port} are filled at launch. --host pinned to loopback.
+args_template = ["--model", "{model_path}", "--host", "{host}", "--port", "{port}"]
+openai_compatible = true
+default_port = 8080
+health_path = "/v1/models"
+ready_timeout_s = 180.0
+
+# Gated/private HF repos need a token; injected into child env only, never logged.
+[server.secret_env]
+HF_TOKEN = "hf_token"
+HUGGING_FACE_HUB_TOKEN = "hf_token"

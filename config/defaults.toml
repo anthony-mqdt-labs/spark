@@ -1,0 +1,75 @@
+# spark default configuration (shipped, read-only).
+# Override per-host in $XDG_CONFIG_HOME/spark/config.toml (or ~/.config/spark/).
+# This file is DATA, not code: no launch flag belongs anywhere but here / runtimes/.
+
+[general]
+host = "127.0.0.1"          # bind loopback only; no LAN exposure by default
+port_range = [8080, 8099]
+log_retention_days = 7
+# Backend preference for this class of host (Apple Silicon). Highest first.
+preference = ["mlx_lm", "mlx_vlm", "llama_cpp", "omlx", "ollama"]
+
+[memory]
+# 16 GB unified memory is shared with the OS + GUI. 0.65 leaves real headroom.
+usable_fraction = 0.65
+enforce = true
+overhead_multiplier = 1.20
+
+[memory.bytes_per_param]
+f16 = 2.0
+bf16 = 2.0
+q8 = 1.0
+q6 = 0.75
+q5 = 0.65
+q4 = 0.5
+q3 = 0.4
+q2 = 0.3
+
+[disk]
+# This host runs hot on disk; refuse downloads that would cross this floor.
+min_free_gib = 10.0
+enforce = true
+
+[supervisor]
+max_restarts = 3
+backoff_base_s = 1.0
+backoff_max_s = 30.0
+health_interval_s = 5.0
+shutdown_grace_s = 10.0
+
+# Research providers for `spark download`: an ordered fallback chain. Each is
+# tried until one returns a schema-valid config. A provider is skipped if its
+# detect_binary is not on PATH. Output is STAGED for review, never auto-applied.
+# HARD RULE: prompts contain only the model card + host facts + runtime names —
+# never secrets (enforced by the secrets-guard before dispatch).
+[research]
+enabled = true
+model_card_chars = 6000
+
+[[research.providers]]
+name = "claude"
+type = "cli"
+detect_binary = "claude"
+command = ["claude", "-p", "--output-format", "json"]
+prompt_via = "stdin"
+parse = "json_envelope"
+envelope_field = "result"
+timeout_s = 300.0
+
+[[research.providers]]
+name = "hermes"
+type = "cli"
+detect_binary = "hermes"
+command = ["hermes", "-p"]
+prompt_via = "stdin"
+parse = "raw_json"
+timeout_s = 300.0
+
+[[research.providers]]
+name = "pi"
+type = "cli"
+detect_binary = "pi"
+command = ["pi"]
+prompt_via = "stdin"
+parse = "raw_json"
+timeout_s = 300.0
