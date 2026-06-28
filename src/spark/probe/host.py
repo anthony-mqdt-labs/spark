@@ -138,6 +138,55 @@ def detect_runtime(rt: RuntimeDef, *, os_name: str, arch: str) -> RuntimeStatus:
     )
 
 
+def _interpreter_for(binary: str) -> str | None:
+    """Resolve the Python interpreter backing a console-script `binary` by reading
+    its shebang. Returns None if it can't be determined (e.g. a compiled binary)."""
+    path = shutil.which(binary)
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as fh:
+            first = fh.readline(256)
+    except OSError:
+        return None
+    if not first.startswith(b"#!"):
+        return None
+    parts = first[2:].strip().decode("utf-8", "replace").split()
+    if not parts:
+        return None
+    # "#!/usr/bin/env python3.12" -> resolve the named interpreter; otherwise the
+    # shebang is a direct path to the venv interpreter (the uv-tool / pip case).
+    if parts[0].rsplit("/", 1)[-1] == "env" and len(parts) > 1:
+        return shutil.which(parts[1])
+    return parts[0]
+
+
+def missing_python_deps(binary: str, modules: list[str]) -> list[str]:
+    """Subset of `modules` NOT importable by `binary`'s own interpreter.
+
+    Uses importlib.find_spec (no heavy import) in the runtime's venv, so it reports
+    exactly what that runtime would see at inference time. Returns [] when there is
+    nothing to check or the interpreter can't be resolved (unknown, not 'missing')."""
+    if not modules:
+        return []
+    interp = _interpreter_for(binary)
+    if not interp:
+        return []
+    code = (
+        "import importlib.util,sys;"
+        "print('\\n'.join(m for m in sys.argv[1:] "
+        "if importlib.util.find_spec(m) is None))"
+    )
+    try:
+        out = subprocess.run(
+            [interp, "-c", code, *modules],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [m for m in out.stdout.split() if m]
+
+
 def probe_host(config: SparkConfig) -> HostProfile:
     os_name = platform.system()
     arch = platform.machine()

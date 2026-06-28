@@ -5,7 +5,7 @@ from __future__ import annotations
 import click
 
 from ..budget import GIB, free_disk_bytes, usable_memory_bytes
-from ..probe.host import load_or_probe
+from ..probe.host import load_or_probe, missing_python_deps
 from .context import build_context
 from .render import console, runtimes_table
 
@@ -33,6 +33,23 @@ def doctor_command(no_cache: bool):
         + ("  [yellow](low disk)[/yellow]" if free < 20 else "")
     )
     console.print(runtimes_table(profile))
+
+    # Runtime readiness: a runtime can be on PATH yet unable to serve because its
+    # own venv is missing inference-time Python deps (declared in [detect]).
+    for name in profile.available_runtimes:
+        rt = ctx.config.runtimes.get(name)
+        if not rt or not rt.detect.python_requires:
+            continue
+        missing = missing_python_deps(rt.detect.binary, rt.detect.python_requires)
+        if missing:
+            with_flags = " ".join(f"--with {m}" for m in missing)
+            base = rt.install_hint if "uv tool install" in rt.install_hint else None
+            fix = f"{base} {with_flags}" if base else f"add to {name}'s venv: {with_flags}"
+            console.print(
+                f"[yellow]![/yellow] {name}: missing Python deps "
+                f"[red]{', '.join(missing)}[/red] (server starts but model-load "
+                f"will fail). Fix: [bold]{fix}[/bold]"
+            )
 
     secret_ok = ctx.secrets.is_available()
     console.print(

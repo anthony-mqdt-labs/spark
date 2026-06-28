@@ -25,6 +25,10 @@ class DetectSpec(_Strict):
     version_args: list[str] = Field(default_factory=lambda: ["--version"])
     # Some tools print version to stderr or need a different probe.
     version_timeout_s: float = 5.0
+    # Python modules the runtime needs at inference time but a bare install may
+    # omit (e.g. mlx-vlm needs torch+torchvision for its image processors).
+    # `spark doctor` verifies these against the runtime's OWN interpreter.
+    python_requires: list[str] = Field(default_factory=list)
 
 
 class ServerSpec(_Strict):

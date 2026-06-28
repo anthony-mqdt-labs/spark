@@ -1,7 +1,15 @@
 from __future__ import annotations
 
+import os
+import sys
+
 from spark.config.schema import DetectSpec, RuntimeDef, ServerSpec
-from spark.probe.host import _detect_version, detect_runtime
+from spark.probe.host import (
+    _detect_version,
+    _interpreter_for,
+    detect_runtime,
+    missing_python_deps,
+)
 
 
 def _rt(**kw):
@@ -47,3 +55,36 @@ def test_detect_present_binary():
     st = detect_runtime(rt, os_name="Darwin", arch="arm64")
     assert st.available
     assert st.path
+
+
+def _fake_cli(tmp_path, monkeypatch, interp=sys.executable):
+    """A console-script-style launcher whose shebang points at `interp`."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    script = bindir / "fakecli"
+    script.write_text(f"#!{interp}\n")
+    script.chmod(0o755)
+    monkeypatch.setenv("PATH", str(bindir) + os.pathsep + os.environ["PATH"])
+    return script
+
+
+def test_interpreter_for_reads_shebang(tmp_path, monkeypatch):
+    _fake_cli(tmp_path, monkeypatch)
+    assert _interpreter_for("fakecli") == sys.executable
+
+
+def test_missing_python_deps_all_present(tmp_path, monkeypatch):
+    _fake_cli(tmp_path, monkeypatch)
+    assert missing_python_deps("fakecli", ["sys", "os", "json"]) == []
+
+
+def test_missing_python_deps_reports_absent(tmp_path, monkeypatch):
+    _fake_cli(tmp_path, monkeypatch)
+    missing = missing_python_deps("fakecli", ["os", "totally_not_real_mod_xyz"])
+    assert missing == ["totally_not_real_mod_xyz"]
+
+
+def test_missing_python_deps_unknown_is_not_missing(monkeypatch):
+    # Unresolvable interpreter or nothing to check -> [] (unknown, never a warning).
+    assert missing_python_deps("definitely-not-a-real-binary-xyz", ["os"]) == []
+    assert missing_python_deps("python3", []) == []

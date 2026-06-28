@@ -9,6 +9,10 @@ install_hint = "uv tool install mlx-vlm"
 [detect]
 binary = "mlx_vlm.server"
 version_args = ["--version"]
+# mlx-vlm's HF image/video processors (e.g. Qwen2VLVideoProcessor) need PyTorch +
+# Torchvision, which a bare `uv tool install mlx-vlm` omits. Without them the server
+# starts but model-load 500s. Fix: uv tool install mlx-vlm --with torch --with torchvision
+python_requires = ["torch", "torchvision"]
 
 [server]
 binary = "mlx_vlm.server"
