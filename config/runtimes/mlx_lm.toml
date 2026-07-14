@@ -9,6 +9,9 @@ install_hint = "uv tool install mlx-lm   (or: pipx install mlx-lm)"
 [detect]
 binary = "mlx_lm.server"
 version_args = ["--version"]
+# mlx_lm.server has no --version (argparse usage banner only) — read the dist
+# version from the runtime's own interpreter instead.
+version_package = "mlx-lm"
 
 [server]
 binary = "mlx_lm.server"

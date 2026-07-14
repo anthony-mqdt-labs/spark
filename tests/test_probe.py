@@ -7,6 +7,7 @@ from spark.config.schema import DetectSpec, RuntimeDef, ServerSpec
 from spark.probe.host import (
     _detect_version,
     _interpreter_for,
+    _version_from_package,
     dep_fix_command,
     detect_runtime,
     missing_python_deps,
@@ -30,6 +31,20 @@ def test_version_extracted_from_clean_output():
 
 def test_usage_banner_yields_no_version():
     assert _detect_version("/bin/echo", ["usage: foo --bar"], 3.0) == ""
+
+
+def test_numeric_version_recovered_from_warning_banner():
+    # ollama with its daemon down prints only warning lines; the dotted version
+    # must still be extracted from them.
+    out = _detect_version(
+        "/bin/echo", ["Warning: client version is 0.32.0"], 3.0
+    )
+    assert out == "0.32.0"
+
+
+def test_loose_version_token_not_taken_from_banner():
+    # The 'version: <word>' pattern is too loose to trust inside banner lines.
+    assert _detect_version("/bin/echo", ["error: version: unknown"], 3.0) == ""
 
 
 def test_detect_os_gating():
@@ -90,6 +105,30 @@ def test_missing_python_deps_unknown_is_not_missing(monkeypatch):
     # Unresolvable interpreter or nothing to check -> [] (unknown, never a warning).
     assert missing_python_deps("definitely-not-a-real-binary-xyz", ["os"]) == []
     assert missing_python_deps("python3", []) == []
+
+
+def test_version_from_package(tmp_path, monkeypatch):
+    _fake_cli(tmp_path, monkeypatch)
+    # click is a spark dependency, so it's installed in the fake cli's
+    # interpreter (sys.executable = this venv).
+    v = _version_from_package("fakecli", "click")
+    assert v and v[0].isdigit()
+    assert _version_from_package("fakecli", "not-a-real-dist-xyz") == ""
+    assert _version_from_package("definitely-not-a-real-binary-xyz", "click") == ""
+
+
+def test_detect_runtime_prefers_version_package(tmp_path, monkeypatch):
+    _fake_cli(tmp_path, monkeypatch)
+    rt = _rt(
+        name="faketool",
+        detect=DetectSpec(
+            binary="fakecli", version_args=["usage: no version here"],
+            version_package="click",
+        ),
+    )
+    st = detect_runtime(rt, os_name="Darwin", arch="arm64")
+    assert st.available
+    assert st.version and st.version[0].isdigit()
 
 
 def test_split_python_req():

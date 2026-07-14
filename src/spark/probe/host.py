@@ -88,6 +88,7 @@ def _chip() -> str:
 
 # --- runtime detection ---------------------------------------------------------
 _VERSION_RE = re.compile(r"\b\d+(?:\.\d+){1,3}\b|\bversion:?\s*\S+", re.I)
+_NUMERIC_VERSION_RE = re.compile(r"\b\d+(?:\.\d+){1,3}\b")
 
 
 def _detect_version(binary_path: str, args: list[str], timeout: float) -> str:
@@ -99,16 +100,46 @@ def _detect_version(binary_path: str, args: list[str], timeout: float) -> str:
             capture_output=True, text=True, timeout=timeout, check=False,
         )
         blob = f"{out.stdout}\n{out.stderr}"
+        banner: list[str] = []
         for line in blob.splitlines():
             line = line.strip()
             if line.lower().startswith(("usage:", "warning:", "error:")):
+                banner.append(line)
                 continue
             m = _VERSION_RE.search(line)
             if m:
                 return line[:80]
+        # Some tools bury the version in a banner line (ollama with its daemon
+        # down: "Warning: client version is 0.32.0"). Accept only a strictly
+        # numeric dotted token from those — never the loose 'version: <word>'.
+        for line in banner:
+            m = _NUMERIC_VERSION_RE.search(line)
+            if m:
+                return m.group(0)
         return ""
     except (OSError, subprocess.SubprocessError):
         return ""
+
+
+def _version_from_package(binary: str, package: str) -> str:
+    """Read `package`'s installed version from `binary`'s own interpreter via
+    importlib.metadata — for runtimes whose server exposes no --version flag
+    (mlx_lm.server, mlx_vlm.server). Fast: never imports the runtime itself."""
+    interp = _interpreter_for(binary)
+    if not interp:
+        return ""
+    code = (
+        "import importlib.metadata,sys;"
+        "print(importlib.metadata.version(sys.argv[1]))"
+    )
+    try:
+        out = subprocess.run(
+            [interp, "-c", code, package],
+            capture_output=True, text=True, timeout=10, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
 
 
 def detect_runtime(rt: RuntimeDef, *, os_name: str, arch: str) -> RuntimeStatus:
@@ -132,7 +163,13 @@ def detect_runtime(rt: RuntimeDef, *, os_name: str, arch: str) -> RuntimeStatus:
             reason=f"'{rt.detect.binary}' not found on PATH",
             install_hint=rt.install_hint,
         )
-    version = _detect_version(path, rt.detect.version_args, rt.detect.version_timeout_s)
+    version = ""
+    if rt.detect.version_package:
+        version = _version_from_package(rt.detect.binary, rt.detect.version_package)
+    if not version:
+        version = _detect_version(
+            path, rt.detect.version_args, rt.detect.version_timeout_s
+        )
     return RuntimeStatus(
         name=rt.name, available=True, path=path, version=version,
         install_hint=rt.install_hint,
@@ -257,9 +294,19 @@ def _cpu_count() -> int:
 
 
 # --- caching -------------------------------------------------------------------
+# Bump when detection logic changes shape/behavior so cached profiles from the
+# old probe re-probe immediately instead of serving stale results for a day.
+_PROBE_SCHEMA_VERSION = 2
+
+
 def _config_fingerprint(config: SparkConfig) -> str:
     blob = json.dumps(
-        {n: rt.model_dump() for n, rt in sorted(config.runtimes.items())},
+        {
+            "_probe_schema": _PROBE_SCHEMA_VERSION,
+            "runtimes": {
+                n: rt.model_dump() for n, rt in sorted(config.runtimes.items())
+            },
+        },
         sort_keys=True, default=str,
     )
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
