@@ -42,14 +42,16 @@ class SparkGroup(click.Group):
 def list_command():
     """List registered models."""
     from ..registry import list_models
-    from .render import models_table
+    from ..registry.store import scan_store
+    from .render import models_table, render_store_issues
 
     ctx = build_context()
     models = list_models(ctx.paths)
-    if not models:
+    if models:
+        console.print(models_table(models))
+    else:
         console.print("[dim]no models registered — try `spark download <hf-repo>`[/dim]")
-        return
-    console.print(models_table(models))
+    render_store_issues(scan_store(ctx.paths))
 
 
 @click.group(cls=SparkGroup, invoke_without_command=True)
