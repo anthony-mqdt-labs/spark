@@ -14,6 +14,7 @@ import hashlib
 import json
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -161,17 +162,30 @@ def _interpreter_for(binary: str) -> str | None:
     return parts[0]
 
 
-def missing_python_deps(binary: str, modules: list[str]) -> list[str]:
-    """Subset of `modules` NOT importable by `binary`'s own interpreter.
+def split_python_req(req: str) -> tuple[str, str]:
+    """Parse a [detect].python_requires entry into (import_module, pip_package).
+
+    An entry is either 'module' or 'module:pip-package' for the cases where the
+    import name differs from the PyPI name (e.g. 'PIL:pillow'). The mapping must
+    be declared in config — spark never guesses a package name from a module."""
+    mod, _, pkg = req.partition(":")
+    mod = mod.strip()
+    return mod, (pkg.strip() or mod)
+
+
+def missing_python_deps(binary: str, requires: list[str]) -> list[str]:
+    """Subset of `requires` whose module is NOT importable by `binary`'s own
+    interpreter. Entries are returned verbatim (see split_python_req).
 
     Uses importlib.find_spec (no heavy import) in the runtime's venv, so it reports
     exactly what that runtime would see at inference time. Returns [] when there is
     nothing to check or the interpreter can't be resolved (unknown, not 'missing')."""
-    if not modules:
+    if not requires:
         return []
     interp = _interpreter_for(binary)
     if not interp:
         return []
+    by_module = {split_python_req(r)[0]: r for r in requires}
     code = (
         "import importlib.util,sys;"
         "print('\\n'.join(m for m in sys.argv[1:] "
@@ -179,12 +193,33 @@ def missing_python_deps(binary: str, modules: list[str]) -> list[str]:
     )
     try:
         out = subprocess.run(
-            [interp, "-c", code, *modules],
+            [interp, "-c", code, *by_module],
             capture_output=True, text=True, timeout=10, check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return []
-    return [m for m in out.stdout.split() if m]
+    return [by_module[m] for m in out.stdout.split() if m in by_module]
+
+
+def dep_fix_command(install_hint: str, missing: list[str]) -> list[str] | None:
+    """Runnable argv that adds `missing` python_requires entries to a runtime's
+    own tool env, derived from its install_hint.
+
+    Only `uv tool install <pkg> ...` hints are extended — uv rebuilds the tool
+    env in place when the requested `--with` set changes, so the command is
+    idempotent and safe to re-run. Any other installer returns None and the
+    operator remediates by hand."""
+    if not missing:
+        return None
+    try:
+        argv = shlex.split(install_hint.strip())
+    except ValueError:
+        return None
+    if argv[:3] != ["uv", "tool", "install"] or len(argv) < 4:
+        return None
+    for req in missing:
+        argv += ["--with", split_python_req(req)[1]]
+    return argv
 
 
 def probe_host(config: SparkConfig) -> HostProfile:

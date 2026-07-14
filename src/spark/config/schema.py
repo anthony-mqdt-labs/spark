@@ -27,7 +27,10 @@ class DetectSpec(_Strict):
     version_timeout_s: float = 5.0
     # Python modules the runtime needs at inference time but a bare install may
     # omit (e.g. mlx-vlm needs torch+torchvision for its image processors).
-    # `spark doctor` verifies these against the runtime's OWN interpreter.
+    # `spark doctor` verifies these against the runtime's OWN interpreter, and
+    # `spark doctor --fix` installs them there (uv-tool runtimes only). Entries
+    # are 'module' or 'module:pip-package' when the import name differs from the
+    # PyPI name (e.g. 'PIL:pillow') — the mapping is always declared, never guessed.
     python_requires: list[str] = Field(default_factory=list)
 
 

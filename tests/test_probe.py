@@ -7,8 +7,10 @@ from spark.config.schema import DetectSpec, RuntimeDef, ServerSpec
 from spark.probe.host import (
     _detect_version,
     _interpreter_for,
+    dep_fix_command,
     detect_runtime,
     missing_python_deps,
+    split_python_req,
 )
 
 
@@ -88,3 +90,38 @@ def test_missing_python_deps_unknown_is_not_missing(monkeypatch):
     # Unresolvable interpreter or nothing to check -> [] (unknown, never a warning).
     assert missing_python_deps("definitely-not-a-real-binary-xyz", ["os"]) == []
     assert missing_python_deps("python3", []) == []
+
+
+def test_split_python_req():
+    assert split_python_req("torch") == ("torch", "torch")
+    assert split_python_req("PIL:pillow") == ("PIL", "pillow")
+    assert split_python_req(" PIL : pillow ") == ("PIL", "pillow")
+
+
+def test_missing_python_deps_returns_raw_req_with_pip_mapping(tmp_path, monkeypatch):
+    _fake_cli(tmp_path, monkeypatch)
+    missing = missing_python_deps(
+        "fakecli", ["os", "totally_not_real_mod_xyz:some-pip-name"]
+    )
+    assert missing == ["totally_not_real_mod_xyz:some-pip-name"]
+
+
+def test_dep_fix_command_extends_uv_tool_install():
+    argv = dep_fix_command("uv tool install mlx-vlm", ["torch", "torchvision"])
+    assert argv == [
+        "uv", "tool", "install", "mlx-vlm",
+        "--with", "torch", "--with", "torchvision",
+    ]
+
+
+def test_dep_fix_command_uses_pip_name_from_mapping():
+    argv = dep_fix_command("uv tool install some-tool", ["PIL:pillow"])
+    assert argv == ["uv", "tool", "install", "some-tool", "--with", "pillow"]
+
+
+def test_dep_fix_command_refuses_non_uv_installers():
+    # Never derive a runnable fix for installers whose semantics we don't own.
+    assert dep_fix_command("brew install llama.cpp", ["torch"]) is None
+    assert dep_fix_command("curl -fsSL https://ollama.com/install.sh | sh", ["x"]) is None
+    assert dep_fix_command("uv tool install", ["torch"]) is None  # no package
+    assert dep_fix_command("uv tool install mlx-vlm", []) is None  # nothing missing
