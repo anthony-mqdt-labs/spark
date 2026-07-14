@@ -2,6 +2,99 @@
 
 Session handoff snapshot. Overwrite at session end / before compaction.
 
+## 2026-07-14 — `spark doctor --fix` (auto-remedy missing runtime Python deps)
+
+**Committed 30bb9f4**, tested (105 tests, was 96), live-verified. The mlx_vlm
+torch/torchvision prerequisite is now self-healing:
+
+- `spark doctor --fix` installs missing `[detect].python_requires` modules into
+  the runtime's OWN tool env. The command is derived from config
+  (`install_hint` + `python_requires`), shown before it runs, and only offered
+  for `uv tool install` hints — spark never guesses at other installers
+  (`dep_fix_command` in probe/host.py returns None for brew/curl hints).
+- `python_requires` entries now support `module:pip-package` syntax for cases
+  where import name ≠ PyPI name (e.g. `PIL:pillow`); mapping is always declared
+  in TOML, never guessed (supply-chain rule).
+- After install, doctor re-verifies via the runtime's interpreter; success →
+  green ✓ + `python_deps_fix_succeeded`; installer failure or still-missing →
+  ✗ + telemetry, and doctor exits 1 with `RT_DEPS_UNFIXED` remediation panel.
+- Live-verified both paths in an isolated SPARK_HOME with a throwaway pycowsay
+  tool env (installed, fixed with `--with six`, then a bogus package to prove
+  the failure path; tool uninstalled after). Real mlx-vlm env untouched — it
+  already has torch/torchvision, so doctor shows no warning on this host.
+- Files: cli/doctor.py (flag + `_fix_python_deps`), probe/host.py
+  (`split_python_req`, `dep_fix_command`, `missing_python_deps` returns raw
+  reqs), config/schema.py + config/runtimes/mlx_vlm.toml comments,
+  tests/test_doctor_fix.py (new), tests/test_probe.py (+5).
+
+## 2026-07-14 — doctor versions column fixed (was mostly "—")
+
+**Committed 1bc9795**, tested (109 tests), live-verified: all 5 available runtimes now
+show a version in `spark doctor`. Three root causes, three fixes (probe/host.py):
+
+1. **mlx_lm/mlx_vlm have no --version** (argparse usage banner only). New
+   `[detect].version_package` config field: read the dist version via
+   `importlib.metadata` in the runtime's OWN interpreter (`_version_from_package`;
+   reuses `_interpreter_for`). Fast — never imports mlx. Tried before
+   version_args when set. Declared in mlx_lm.toml + mlx_vlm.toml.
+2. **ollama with daemon down** prints only `Warning: client version is 0.32.0`,
+   which the banner filter skipped. `_detect_version` now does a second pass
+   over skipped banner lines accepting a strictly numeric dotted token only
+   (never the loose `version: <word>`).
+3. **Stale cache**: llama_cpp detection worked live, but the day-long host-profile
+   cache served old empty results, and nothing busted it on code changes. Added
+   `_PROBE_SCHEMA_VERSION` to the cache fingerprint — bump it whenever detection
+   logic changes shape/behavior.
+
+## Triage 2026-07-13 — RESOLVED same day: all 4 bugs fixed; download blocked by HF, not spark
+
+All four triage bugs fixed, tested (96 tests, was 79), live-verified.
+**Committed 93db25d** (2026-07-14).
+
+1. **Telemetry gap — FIXED.** `_run_fetch` (cli/download.py) guarantees exactly
+   one terminal event per fetch: `fetch_complete` (bytes/wall_s/rate) /
+   `fetch_failed` (rc or error_type) / `fetch_interrupted` (SIGINT caught;
+   SIGTERM/SIGHUP via temporary handler → log → exit 128+n). Live-verified
+   twice by SIGTERMing real wedged downloads.
+2. **Partial downloads visible — FIXED.** New `registry/store.py::scan_store`;
+   `spark list` + `spark doctor` flag partial/orphaned store dirs with
+   resume/clean hints (`render_store_issues` in cli/render.py).
+3. **Disk preflight — FIXED.** Projected-size gate: repo size from the HF API
+   (stdlib urllib, token optional), resume-bytes credit, `free − need ≥ floor`
+   via `budget.check_disk`; `--force` bypass (logs `disk_gate_forced`); loud
+   floor-only fallback when size unknown. Live-verified: correctly refused the
+   5.57 GiB Ornith fetch at 10.2 GiB free / 10 GiB floor (exit 75, RUN_DISK).
+4. **June silent deaths — DIAGNOSED, two layers.** (a) The silence: Ctrl-C path
+   had no telemetry (bug 1). LuLu exonerated — a denial would have exited
+   non-zero, the one path that *was* logged. (b) The actual killer, reproduced
+   live today: **HF's Xet CAS bridge denies large-blob transfers from the
+   Proton VPN shared exit IP** — 403 AccessDenied on any repo, with or without
+   a valid token, while API + small files work. With hf_xet installed the
+   client doesn't error, it retry-wedges at a deterministic byte offset
+   (2,677,991,959 twice today). `HF_HUB_DISABLE_XET=1` surfaces the honest 403.
+   Wiki: `bugs/spark-infra-hf-cas-bridge-403-stall-001.md` and
+   `bugs/spark-python-silent-download-death-001.md`. Also learned:
+   `*.incomplete` fragments are never reused across runs (random per-run
+   suffix) — every retry restarts the blob from 0; stale fragments are dead
+   weight.
+
+**Ornith download status:** operator approved `--force`; 3 attempts made.
+`store/ornith-1.0-9b-4bit/` has shard 2 complete (600 MB) + all metadata;
+shard 1 (5.35 GB) blocked by the 403 above. **Not registered** (registration
+only follows a successful fetch); shows in `spark list` as an orphaned store
+dir, as designed. Unblock options (operator calls): change VPN exit / toggle
+VPN, or wait out the IP block, then rerun
+`spark download mlx-community/Ornith-1.0-9B-4bit` (disk now ~21 GiB free —
+gate passes without --force). Consider `HF_HUB_DISABLE_XET=1` so a re-block
+fails fast instead of wedging. June's orphan
+(`store/ornith-1.0-9b-4bit-mtp-mlx-serve/`, 203 MB, superseded giaki3003 repo)
+still present — safe to `rm -rf` once confirmed unwanted.
+
+**Context:** quorum (`../quorum`) needs spark healthy for its Seam #1
+(real inference for its society of minds). Note for that use: a 9B model is
+likely wrong-sized anyway — quorum wants several *small* minds (0.5–3B) on this
+16 GB M2, not one large one.
+
 ## What spark is
 A hardened wrapper that fronts every local LLM inference runtime behind one
 `spark` command (Apple Silicon / M2, 16 GB). Wrapper-only: orchestrates installed
@@ -122,6 +215,8 @@ lived in a throwaway `SPARK_HOME`).
       runtime's OWN interpreter (console-script shebang) and find_spec-checks the
       modules there, printing the `--with` fix if any are missing. Data-driven, so
       adding a dep check to another runtime is a one-line TOML edit, no code.
+      **2026-07-14: `spark doctor --fix` now applies that fix automatically** (see
+      top of this file).
   - **ollama — DONE (live-verified 2026-06-28)**. Registered an isolated SPARK_HOME
     entry (`backend=ollama`, `launch_overrides.ollama_tag=qwen3.5:0.8b-mlx`, the
     smallest already-cached tag), ran `spark run`. Verified: preflight (disk gate) →
@@ -165,4 +260,5 @@ SPARK_HOME=<dir> uv run spark ...  # isolate config/data/logs for testing
   imports mlx, so this never bites.
 - Keychain uses deprecated-but-functional SecKeychain* APIs (the `security` CLI uses
   them too). If a future macOS removes them, migrate to SecItem* (CFDictionary).
-- mlx_lm/mlx_vlm have no `--version`; probe extracts a version token or shows none.
+- mlx_lm/mlx_vlm have no `--version`; probe reads their dist version from the
+  runtime's own interpreter via `[detect].version_package` (2026-07-14).
