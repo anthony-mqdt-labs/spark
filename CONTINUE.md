@@ -2,6 +2,36 @@
 
 Session handoff snapshot. Overwrite at session end / before compaction.
 
+## 2026-07-15 — Ornith → hub cache + speculative-decoding draft (BLOCKED: architecture)
+
+Done as requested, but the payoff is blocked by Ornith's architecture. State:
+- **spark store copy of Ornith REMOVED** (reclaimed 5.6 GB). Registry entry
+  `ornith-1.0-9b-4bit.toml` now has `path=""` → resolves via `hf_repo` → the
+  HF hub cache copy (SHA-256-verified earlier). backend pinned `mlx_lm`.
+  Live-confirmed: `mlx_lm.server` fetched all 12 files instantly from cache
+  (no re-download, not the deleted store path).
+- **Draft downloaded to hub cache**: `mlx-community/Qwen3.5-0.8B-OptiQ-4bit`
+  (0.67 GB, verified complete). Registered as `qwen3.5-0.8b-optiq-4bit.toml`
+  (alias `ornith-draft`). Vocab byte-identical to Ornith (core 248044 / lm_head
+  248320) — a perfect tokenizer match.
+- **Wired**: Ornith `launch_overrides = {--draft-model =
+  mlx-community/Qwen3.5-0.8B-OptiQ-4bit, --num-draft-tokens = 3}`. spark builds
+  the exact right command; both models load fine.
+- **BLOCKER (architectural, not fixable in config)**: first generation crashes
+  with `ValueError: Speculative decoding requires a trimmable prompt cache (got
+  {'ArraysCache'})`. Ornith is `qwen3_5` HYBRID **linear-attention** — its
+  layers keep a non-trimmable recurrent `ArraysCache`, and spec decoding must
+  rewind the cache to reject drafts. NOT a vocab problem (match was perfect);
+  plain generation (no draft) works. Wiki:
+  `bugs/spark-mlx-ornith-linear-attn-no-spec-decoding-001.md`.
+- **DECISION PENDING (left wired per instruction)**: as configured Ornith
+  generation will error every request. Options: (a) drop the two
+  launch_overrides → working (slow) Ornith via mlx_lm; (b) pursue `mlx-serve` +
+  the `giaki3003/…-MTP-MLX-Serve` head (purpose-built for this exact model, so
+  it MAY implement trimmable linear-attn state — unverified on-device); (c)
+  leave wired for a future spec-decoding-capable runtime. The draft download +
+  registration are keepers regardless.
+
 ## 2026-07-14 — `spark doctor --fix` (auto-remedy missing runtime Python deps)
 
 **Committed 30bb9f4**, tested (105 tests, was 96), live-verified. The mlx_vlm
@@ -46,6 +76,25 @@ show a version in `spark doctor`. Three root causes, three fixes (probe/host.py)
    `_PROBE_SCHEMA_VERSION` to the cache fingerprint — bump it whenever detection
    logic changes shape/behavior.
 
+## 2026-07-14 — research chain: LLM output rejected + no parse-failure sample
+
+**Uncommitted**, tested (112 tests), live-verified. Operator's morning
+`spark research ornith-1.0-9b-4bit` run exhausted all 3 providers
+(NET_RESEARCH_EXHAUSTED). Per-provider: hermes returned a *valid* answer that
+spark rejected (ints for launch_overrides values vs strict `dict[str,str]`);
+claude emitted unterminated JSON (undiagnosable — output wasn't preserved);
+pi's ollama backend daemon was down (environmental, known).
+
+- `RuntimeRec.launch_overrides` before-validator coerces scalar values
+  (int/float → str, bool → "true"/"false"); lists/dicts still fail loudly.
+- `CliAgentProvider.research` logs `provider_output_unparseable` with
+  `output_head`/`output_tail` (256) + `output_len` before re-raising.
+- Live-verified in isolated SPARK_HOME: fake garbage provider → sample logged,
+  fallthrough; fake hermes-shaped provider (ints) → accepted, staged JSON has
+  string overrides. Wiki: `bugs/spark-python-research-llm-output-rejected-001.md`.
+- A real rerun of `spark research ornith-1.0-9b-4bit` should now succeed off
+  hermes even if claude truncates again; start the ollama daemon to restore pi.
+
 ## Triage 2026-07-13 — RESOLVED same day: all 4 bugs fixed; download blocked by HF, not spark
 
 All four triage bugs fixed, tested (96 tests, was 79), live-verified.
@@ -78,17 +127,38 @@ All four triage bugs fixed, tested (96 tests, was 79), live-verified.
    suffix) — every retry restarts the blob from 0; stale fragments are dead
    weight.
 
-**Ornith download status:** operator approved `--force`; 3 attempts made.
-`store/ornith-1.0-9b-4bit/` has shard 2 complete (600 MB) + all metadata;
-shard 1 (5.35 GB) blocked by the 403 above. **Not registered** (registration
-only follows a successful fetch); shows in `spark list` as an orphaned store
-dir, as designed. Unblock options (operator calls): change VPN exit / toggle
-VPN, or wait out the IP block, then rerun
-`spark download mlx-community/Ornith-1.0-9B-4bit` (disk now ~21 GiB free —
-gate passes without --force). Consider `HF_HUB_DISABLE_XET=1` so a re-block
-fails fast instead of wedging. June's orphan
-(`store/ornith-1.0-9b-4bit-mtp-mlx-serve/`, 203 MB, superseded giaki3003 repo)
-still present — safe to `rm -rf` once confirmed unwanted.
+**Ornith download status — COMPLETE & SHA-256-VERIFIED (2026-07-14).** The
+earlier "shard 1 blocked" note is superseded: shard 1 (5.35 GB) finished
+2026-07-13 16:29 on a later attempt. Full verification run 2026-07-14:
+- `store/ornith-1.0-9b-4bit/` = 5.6 GB, both shards + all tokenizer/config/
+  chat-template files. No `*.incomplete` fragments (only finalized `.lock` +
+  `.metadata` receipts).
+- Both safetensors byte-exact: `8 + header_len + max_tensor_offset` == file
+  size to the byte (5,349,769,710 and 600,449,850).
+- `model.safetensors.index.json` reconciles: total_size 5,950,061,024 ==
+  files_sum − headers, 1,260 tensors across 2 shards.
+- **SHA-256 of both shards matches the HF LFS receipts exactly**
+  (shard1 `60e62b00…`, shard2 `736da496…`). Cryptographically complete.
+- **Now REGISTERED**: `models/ornith-1.0-9b-4bit.toml` (hf_repo, path,
+  format=mlx, quant=q4, params=9.0, **research_status=pending**). Supersedes
+  the old "Not registered" note.
+- A staged research result exists (`staging/ornith-1.0-9b-4bit.json`,
+  provider=claude, recommends **mlx_vlm** — Ornith is a VL model, has
+  video/image preprocessor configs) but is **not yet accepted** (registry
+  backend still empty). Accept via `spark config review ornith-1.0-9b-4bit
+  --accept`. NB the 2026-07-14 AM re-run of `spark research` on this model
+  exhausted all 3 providers — see the research-chain section above; fixes
+  landed, a rerun should now succeed off hermes.
+- June's orphan (`store/ornith-1.0-9b-4bit-mtp-mlx-serve/`) is **gone** —
+  store now holds only `ornith-1.0-9b-4bit`. `spark list` reports no store
+  issues.
+
+**Not currently running.** The mlx_lm.server that was serving Ornith on
+:8082 has stopped (port dead, no process). A separate `omlx-server` (unrelated
+to this spark run) is up on :8080. Relaunch with `spark ornith-1.0-9b-4bit`.
+NB it loads via mlx_lm (text) despite the staged mlx_vlm recommendation, since
+research was never accepted; a 9B model is also slow on this 16 GB M2 (>2 min
+for a short reply).
 
 **Context:** quorum (`../quorum`) needs spark healthy for its Seam #1
 (real inference for its society of minds). Note for that use: a 9B model is

@@ -10,9 +10,14 @@ from abc import ABC, abstractmethod
 
 from ..config.schema import ResearchProviderDef, SparkConfig
 from ..errors import SparkError
+from ..telemetry import get_telemetry
 from .guard import assert_no_secrets
 from .prompt import build_prompt
 from .types import ResearchOutput, ResearchRequest
+
+# Raw-output sample size on parse/validation failure (logging mandate: raw bytes
+# truncated to 256). Head and tail both logged — truncation shows at the tail.
+_SAMPLE_CHARS = 256
 
 _FENCE_RE = re.compile(r"```(?:json)?\s*(\{.*?\})\s*```", re.S)
 
@@ -107,12 +112,25 @@ class CliAgentProvider(ResearchProvider):
             )
 
         text = proc.stdout
-        if self.defn.parse == "json_envelope":
-            envelope = json.loads(proc.stdout)
-            text = envelope.get(self.defn.envelope_field, "")
-
-        obj = _extract_json(text)
-        return ResearchOutput.model_validate(obj)
+        try:
+            if self.defn.parse == "json_envelope":
+                envelope = json.loads(proc.stdout)
+                text = envelope.get(self.defn.envelope_field, "")
+            obj = _extract_json(text)
+            return ResearchOutput.model_validate(obj)
+        except Exception as exc:
+            # Without a sample the failure is undiagnosable post-hoc (the agent
+            # output is gone). Never contains our secrets: the prompt passed the
+            # guard, and telemetry redaction still applies on write.
+            get_telemetry().warn(
+                "research", "provider_output_unparseable",
+                provider=self.name,
+                error=str(exc)[:300],
+                output_len=len(text),
+                output_head=text[:_SAMPLE_CHARS],
+                output_tail=text[-_SAMPLE_CHARS:] if len(text) > _SAMPLE_CHARS else "",
+            )
+            raise
 
 
 def build_providers(config: SparkConfig) -> list[ResearchProvider]:

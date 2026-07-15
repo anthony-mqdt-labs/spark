@@ -117,6 +117,53 @@ def test_cli_provider_unavailable_when_binary_missing():
     assert CliAgentProvider(defn).is_available() is False
 
 
+# --- agent output tolerance ------------------------------------------------------
+def test_launch_overrides_coerce_llm_scalars():
+    # Regression: hermes returned bare JSON numbers for numeric flags
+    # (2026-07-14, NET_RESEARCH_EXHAUSTED on a semantically valid answer).
+    out = ResearchOutput.model_validate({
+        "recommended_backend": "mlx_vlm",
+        "per_runtime": {
+            "mlx_vlm": {"quant": "q4", "launch_overrides": {"max_tokens": 4096}},
+            "ollama": {"launch_overrides": {"num_ctx": 32768, "f16": True}},
+            "omlx": {"launch_overrides": {"temp": 0.8, "already": "str"}},
+        },
+    })
+    assert out.per_runtime["mlx_vlm"].launch_overrides == {"max_tokens": "4096"}
+    assert out.per_runtime["ollama"].launch_overrides == {
+        "num_ctx": "32768", "f16": "true"
+    }
+    assert out.per_runtime["omlx"].launch_overrides == {
+        "temp": "0.8", "already": "str"
+    }
+
+
+def test_launch_overrides_still_reject_non_scalars():
+    with pytest.raises(Exception):
+        ResearchOutput.model_validate({
+            "recommended_backend": "mlx_lm",
+            "per_runtime": {
+                "mlx_lm": {"launch_overrides": {"bad": ["a", "list"]}},
+            },
+        })
+
+
+def test_cli_provider_logs_output_sample_on_parse_failure(tmp_path):
+    from spark.telemetry import init_telemetry
+
+    init_telemetry(tmp_path / "logs", session_id="test-sample")
+    script = 'import sys; sys.stdin.read(); print(\'{"unterminated": \')'
+    defn = ResearchProviderDef(name="fake", command=[sys.executable, "-c", script],
+                               prompt_via="stdin", parse="raw_json")
+    with pytest.raises(ValueError, match="unterminated"):
+        CliAgentProvider(defn).research(_req())
+    blob = "".join(
+        p.read_text() for p in (tmp_path / "logs").rglob("*.jsonl")
+    )
+    assert "provider_output_unparseable" in blob
+    assert '{\\"unterminated\\":' in blob  # the raw sample survived into the log
+
+
 # --- staging -------------------------------------------------------------------
 def test_stage_load_and_apply(paths):
     out = ResearchOutput(
