@@ -46,9 +46,20 @@ def _emit_value(v) -> str:
     raise ModelError(f"Cannot serialize value of type {type(v)!r} to TOML.")
 
 
+def _dump_table(lines: list[str], header: str, table: dict) -> None:
+    """Emit a ``[header]`` block of scalar key/values (skips empties)."""
+    lines.append("")
+    lines.append(f"[{header}]")
+    for k, v in table.items():
+        if v is None or v == "":
+            continue
+        lines.append(f"{k} = {_emit_value(v)}")
+
+
 def _dump_entry(entry: ModelEntry) -> str:
     data = entry.model_dump()
     overrides = data.pop("launch_overrides", {}) or {}
+    dflash = data.pop("dflash", None)  # nested table, emitted after top-level scalars
     lines = ["# spark model registry entry (auto-managed)."]
     for k, v in data.items():
         if v is None or v == "":
@@ -57,10 +68,12 @@ def _dump_entry(entry: ModelEntry) -> str:
             continue
         lines.append(f"{k} = {_emit_value(v)}")
     if overrides:
-        lines.append("")
-        lines.append("[launch_overrides]")
-        for k, v in overrides.items():
-            lines.append(f"{k} = {_emit_value(v)}")
+        _dump_table(lines, "launch_overrides", overrides)
+    if dflash:
+        d_over = dflash.pop("launch_overrides", {}) or {}
+        _dump_table(lines, "dflash", dflash)
+        if d_over:
+            _dump_table(lines, "dflash.launch_overrides", d_over)
     return "\n".join(lines) + "\n"
 
 

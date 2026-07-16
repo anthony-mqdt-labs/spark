@@ -162,6 +162,21 @@ class SparkConfig(_Strict):
 
 
 # --- model registry ------------------------------------------------------------
+class DFlashProfile(_Strict):
+    """Opt-in DFlash speculative-decoding profile, activated by
+    ``spark run <model> --dflash``.
+
+    Stored separately from the model's *default* (plain) launch so DFlash is never
+    the default path: on 16 GB-class Apple Silicon it is a net loss for 4-bit targets
+    and OOMs for higher-precision ones (patchwork inference-bench result #002). It
+    only pays off with RAM headroom for a high-precision target + drafter, hence
+    opt-in until the host warrants it. Mirrors the model's own ``backend`` +
+    ``launch_overrides`` shape so it composes through the normal launch path."""
+
+    backend: str = "mlx_vlm"                                        # runtime implementing DFlash
+    launch_overrides: dict[str, str] = Field(default_factory=dict)  # drafter flags (--draft-model, …)
+
+
 class ModelEntry(_Strict):
     """A registered model (one TOML per model under the data dir)."""
 
@@ -180,3 +195,17 @@ class ModelEntry(_Strict):
     research_status: Literal["pending", "staged", "registered", "manual"] = "pending"
     aliases: list[str] = Field(default_factory=list)
     notes: str = ""
+    # Opt-in speculative-decoding profile; None = model has no DFlash path (--dflash errors).
+    dflash: DFlashProfile | None = None
+
+    def with_dflash(self) -> "ModelEntry":
+        """Copy configured for DFlash: the profile's backend, with its drafter
+        overrides merged over the model's own. Caller ensures ``dflash`` is set."""
+        assert self.dflash is not None, "with_dflash() requires a dflash profile"
+        p = self.dflash
+        return self.model_copy(
+            update={
+                "backend": p.backend or self.backend,
+                "launch_overrides": {**self.launch_overrides, **p.launch_overrides},
+            }
+        )

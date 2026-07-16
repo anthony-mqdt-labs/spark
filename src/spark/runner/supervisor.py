@@ -22,6 +22,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -50,6 +51,18 @@ class LaunchResult:
     restarts: int
 
 
+@dataclass
+class ReadyInfo:
+    """Handed to the ``on_ready`` callback the moment the server first goes healthy,
+    so the CLI can print a clean startup banner instead of the child's raw logs."""
+
+    base_url: str
+    backend: str
+    port: int
+    elapsed_s: float
+    log_path: str
+
+
 def _port_free(host: str, port: int) -> bool:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -69,7 +82,7 @@ def _pick_port(host: str, preferred: int, lo: int, hi: int) -> int:
     raise PortInUseError(
         f"No free port in range {lo}-{hi} (preferred {preferred} busy).",
         remediation=[
-            f"Free a port or widen general.port_range in your config.",
+            "Free a port or widen general.port_range in your config.",
             f"Find the holder: lsof -nP -iTCP:{preferred} -sTCP:LISTEN",
         ],
         context={"preferred": preferred, "range": [lo, hi]},
@@ -111,6 +124,21 @@ class Supervisor:
         self._stop = threading.Event()
         self._proc: subprocess.Popen | None = None
         self._peak_rss = 0
+        # Child stdout/stderr are redirected here (not the terminal) to keep the
+        # CLI output clean; tailed on failure so the reason still surfaces.
+        self._log_path = paths.log_dir / "servers" / f"{entry.id}.log"
+        self._log_fh = None
+
+    @property
+    def log_path(self) -> Path:
+        return self._log_path
+
+    def log_tail(self, n: int = 30) -> str:
+        """Last ``n`` lines of the child server log (empty if none)."""
+        try:
+            return "\n".join(self._log_path.read_text(errors="replace").splitlines()[-n:])
+        except OSError:
+            return ""
 
     # -- preflight -------------------------------------------------------------
     def _preflight(self) -> int:
@@ -192,7 +220,7 @@ class Supervisor:
                 raise LaunchError(
                     f"Server exited during startup (code {self._proc.returncode}).",
                     remediation=[
-                        "Check the server output above for the failure reason.",
+                        f"See the server log: {self._log_path}",
                         "Run `spark doctor` to confirm the runtime is healthy.",
                     ],
                     context={"returncode": self._proc.returncode},
@@ -233,8 +261,15 @@ class Supervisor:
             model=self.entry.id, cwd=str(Path.cwd()),
         )
         try:
-            # Child inherits stdout/stderr so the operator sees server logs live.
-            self._proc = subprocess.Popen(cmd, env=env)
+            # Child stdout+stderr go to the per-run log file, not the terminal, so
+            # the CLI stays clean (Vite-style). The log is tailed on failure.
+            self._log_fh.write(
+                f"\n=== spawn {time.strftime('%Y-%m-%dT%H:%M:%S')} :: {' '.join(cmd)} ===\n"
+            )
+            self._log_fh.flush()
+            self._proc = subprocess.Popen(
+                cmd, env=env, stdout=self._log_fh, stderr=subprocess.STDOUT
+            )
         except FileNotFoundError as exc:
             raise LaunchError(
                 f"Runtime binary not found: {cmd[0]}",
@@ -277,7 +312,27 @@ class Supervisor:
         return "stop_requested"
 
     # -- public ----------------------------------------------------------------
-    def run(self) -> LaunchResult:
+    def run(self, on_ready: Callable[[ReadyInfo], None] | None = None) -> LaunchResult:
+        self._log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._log_fh = open(self._log_path, "w", buffering=1)
+        try:
+            return self._run(on_ready)
+        finally:
+            if self._log_fh:
+                self._log_fh.close()
+                self._log_fh = None
+
+    def _announce_ready(
+        self, on_ready, base: str, port: int, since: float
+    ) -> None:
+        if on_ready is not None:
+            on_ready(ReadyInfo(
+                base_url=base, backend=self.backend.name, port=port,
+                elapsed_s=time.monotonic() - since, log_path=str(self._log_path),
+            ))
+
+    def _run(self, on_ready: Callable[[ReadyInfo], None] | None) -> LaunchResult:
+        t0 = time.monotonic()
         port = self._preflight()
         host = self.config.general.host
         url = self.backend.health_url(host, port)
@@ -293,6 +348,7 @@ class Supervisor:
                 "supervisor", "attached", endpoint=base, port=port,
                 backend=self.backend.name, model=self.entry.id,
             )
+            self._announce_ready(on_ready, base, port, t0)
             self._monitor_attached(url)
             self.log.info("supervisor", "detached", port=port, model=self.entry.id)
             return LaunchResult(base, self.backend.name, port, 0)
@@ -303,6 +359,7 @@ class Supervisor:
         max_restarts = self.config.supervisor.max_restarts
         backoff = self.config.supervisor.backoff_base_s
         started_at = time.time()
+        announced = False
 
         for attempt in range(max_restarts + 1):
             if self._stop.is_set():
@@ -333,6 +390,9 @@ class Supervisor:
                 endpoint=url, backend=self.backend.name, port=port,
                 attempt=attempt + 1,
             )
+            if not announced:
+                self._announce_ready(on_ready, base, port, t0)
+                announced = True
             reason = self._monitor(url)
 
             if reason == "stop_requested":
@@ -359,7 +419,7 @@ class Supervisor:
             raise RecoveryExhaustedError(
                 f"'{self.entry.id}' crashed and exhausted {max_restarts} restart(s).",
                 remediation=[
-                    "Inspect the server output above and the JSONL logs.",
+                    f"See the server log: {self._log_path}",
                     "Try `--force` off / a smaller quant if this is an OOM.",
                     "Run `spark doctor` to verify the runtime.",
                 ],

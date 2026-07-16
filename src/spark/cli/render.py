@@ -32,6 +32,21 @@ def render_error(exc: SparkError) -> None:
     )
 
 
+def render_server_log(log_path, tail: str) -> None:
+    """On launch failure, show the tail of the child server log (its output was
+    redirected off the terminal to keep startup clean)."""
+    if not tail.strip():
+        return
+    err_console.print(
+        Panel(
+            tail,
+            title=f"server log · {log_path}",
+            border_style="red",
+            expand=False,
+        )
+    )
+
+
 def runtimes_table(profile) -> Table:
     t = Table(title="Runtimes", expand=False)
     t.add_column("runtime", style="cyan")
