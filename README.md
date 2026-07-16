@@ -135,8 +135,19 @@ spark/
 │   ├── research/                # types/guard/prompt/providers/chain/staging
 │   ├── telemetry/               # jsonl.py (structured logging + redaction)
 │   └── errors.py                # typed errors carrying remediation
-└── tests/                       # pytest (76 tests)
+├── tests/                       # pytest (76 tests)
+├── spikes/                      # time-boxed evaluation spikes + the portable
+│                                #   human/emotion eval skill (spikes/README.md)
+├── bake-offs/                   # comparative model bake-offs — quality evals,
+│                                #   distinct from patchwork's throughput benches
+└── MODEL-EVAL-2026-07-15.md     # cross-model capability matrix + tactical use/dismissal
 ```
+
+> **Model evaluation artifacts.** `spikes/`, `bake-offs/`, and the dated
+> `MODEL-EVAL-*.md` at root capture *which model to reach for and why* — capability
+> matrices, expect/employ guidance, and reproducible test batteries. Start with
+> [`MODEL-EVAL-2026-07-15.md`](MODEL-EVAL-2026-07-15.md) for the current
+> at-a-glance picture.
 
 **Layering rule:** `cli/` is thin and may import anything; core packages
 (`config`, `secrets`, `runtimes`, `probe`, `registry`, `runner`, `research`,
