@@ -1,0 +1,41 @@
+# Relay backend — proxy requests to external OpenAI-compatible services.
+#
+# Instead of running a local inference server, this backend forwards requests to
+# an external HTTP endpoint (e.g., patchwork dynamic router, another spark
+# instance, a deployed inference service).
+#
+# Uncomment and customize for your external service. Example configs:
+#
+#   [1] Local patchwork dynamic router:
+#       relay_base_url = "http://localhost:8000"
+#       relay_health_endpoint = "/health"
+#
+#   [2] Remote OpenAI-compatible service:
+#       relay_base_url = "http://inference.example.com"
+#       relay_health_endpoint = "/v1/models"
+#
+# When a relay is configured, spark will:
+#   - NOT spawn any local process (attach_if_running = true)
+#   - Check health at relay_base_url + relay_health_endpoint
+#   - Forward /v1/... requests to relay_base_url/v1/...
+
+name = "relay"
+description = "Relay backend for proxying to external OpenAI-compatible services."
+model_format = "any"
+
+[detect]
+# Relay has no local binary to detect; this is a placeholder.
+binary = "true"
+version_args = []
+
+[server]
+# Relay fields: configure these to point to your external service.
+relay_base_url = "http://127.0.0.1:8000"    # Default to local patchwork router
+relay_health_endpoint = "/health"
+
+# Standard OpenAI-compatible settings.
+openai_compatible = true
+default_port = 8080
+health_path = "/health"    # Not used by relay, but kept for compatibility
+ready_timeout_s = 120.0
+attach_if_running = true   # Always attach; never spawn a local process
