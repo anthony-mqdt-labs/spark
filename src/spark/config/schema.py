@@ -43,9 +43,12 @@ class ServerSpec(_Strict):
 
     ``args_template`` tokens are formatted with a context dict containing at least:
     ``model_path``, ``model_id``, ``host``, ``port``. Unknown placeholders raise.
+
+    For relay backends, ``binary`` and ``args_template`` are ignored; instead
+    ``relay_base_url`` and ``relay_health_endpoint`` are used to proxy requests.
     """
 
-    binary: str
+    binary: str = ""
     args_template: list[str] = Field(default_factory=list)
     openai_compatible: bool = True
     default_port: int = 8080
@@ -59,6 +62,10 @@ class ServerSpec(_Strict):
     # Map of CHILD_ENV_VAR -> secret name in the vault. Resolved at spawn time and
     # injected into the child env only. Never logged, never written to disk.
     secret_env: dict[str, str] = Field(default_factory=dict)
+    # Relay backend fields: external service base URL for proxying requests.
+    relay_base_url: str = ""
+    # Health endpoint path on the external relay service (default "/health").
+    relay_health_endpoint: str = "/health"
 
 
 class RuntimeDef(_Strict):
