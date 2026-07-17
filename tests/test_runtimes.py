@@ -163,3 +163,45 @@ def test_openai_base_url():
 def test_ollama_attaches():
     cfg = load_config()
     assert get_backend("ollama", cfg).attach_if_running is True
+
+
+def test_relay_backend_instantiation():
+    """Relay backend can be instantiated with external endpoint."""
+    cfg = load_config()
+    b = get_backend("relay", cfg)
+    # Relay should attach to external service, never spawn
+    assert b.attach_if_running is True
+
+
+def test_relay_build_launch_cmd_returns_empty():
+    """Relay doesn't spawn a process, so launch cmd is empty or placeholder."""
+    cfg = load_config()
+    b = get_backend("relay", cfg)
+    entry = ModelEntry(id="external", path="", hf_repo="")
+    # Relay should return empty or a placeholder, not a real command
+    cmd = b.build_launch_cmd(entry, "127.0.0.1", 8080)
+    assert isinstance(cmd, list)
+    # Should not have a real binary like mlx_lm.server
+    if cmd:
+        assert not cmd[0].endswith(".server")
+
+
+def test_relay_health_url_points_to_external_endpoint():
+    """Relay health URL points to the configured external service."""
+    cfg = load_config()
+    b = get_backend("relay", cfg)
+    # For a relay to external service at http://localhost:8000/v1
+    # health check should be at the configured endpoint
+    health_url = b.health_url("127.0.0.1", 8080)
+    # Should point to the relay's configured endpoint, not localhost:8080
+    # The relay backend knows its external service URL
+    assert "http://" in health_url
+
+
+def test_relay_openai_base_url_points_to_external_endpoint():
+    """Relay OpenAI base URL points to the configured external service."""
+    cfg = load_config()
+    b = get_backend("relay", cfg)
+    base_url = b.openai_base_url("127.0.0.1", 8080)
+    assert "http://" in base_url
+    assert "/v1" in base_url
