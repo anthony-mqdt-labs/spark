@@ -2,6 +2,23 @@
 
 Session handoff snapshot. Overwrite at session end / before compaction.
 
+## 2026-07-17 — darkcore runtime: spark OWNS the patchwork router (committed 3091a74)
+
+New pure-TOML runtime (`config/runtimes/darkcore.toml`, generic Backend):
+`spark darkcore-router` spawns `python -m darkcore.server` (mlx-lm tool env,
+PYTHONPATH → patchwork/experiments/router) under the supervisor — health-wait
+on `/health`, bounded restart, graceful SIGINT. Live-verified: ready in 3.0s,
+real completion through the T0/T1/T2 cascade (response carries `patchwork`
+trace object + real usage — the router's new seam contract), SIGINT → child
+reaped, port free. 124 tests (5 new in test_darkcore_runtime.py).
+
+- Registry entry: `~/.local/share/spark/models/darkcore-router.toml`.
+- **Relay backend is now for REMOTE routers only** — local default is this
+  supervised child (it can restart; relay can only watch).
+- Gotcha: spark's memory gate can't see the router's internal tier weights
+  (~8 GB worst case at T2) — schedule it with the box to itself.
+- Router docs: patchwork/experiments/router/{QUICKSTART,INTEGRATION-GUIDE}.md.
+
 ## 2026-07-15 — Ornith → hub cache + speculative-decoding draft (BLOCKED: architecture)
 
 Done as requested, but the payoff is blocked by Ornith's architecture. State:
