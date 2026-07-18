@@ -8,8 +8,7 @@ from spark.config.loader import load_config
 from spark.config.schema import ModelEntry
 from spark.runtimes import get_backend
 
-MLXPY = "$(uv tool dir)/mlx-lm/bin/python"
-DARKCORE_DIR = "${DARKCORE_ROUTER_DIR}"
+ROUTER_PY = "${DARKCORE_ROUTER_DIR}/.venv/bin/python"
 
 
 def _entry() -> ModelEntry:
@@ -28,18 +27,19 @@ def test_darkcore_launch_cmd_is_module_invocation():
     cfg = load_config()
     b = get_backend("darkcore", cfg)
     cmd = b.build_launch_cmd(_entry(), "127.0.0.1", 8000)
-    assert cmd[0] == MLXPY
+    assert cmd[0] == ROUTER_PY
     assert cmd[1:3] == ["-m", "darkcore.server"]
     assert "--host" in cmd and "127.0.0.1" in cmd
     assert "--port" in cmd and "8000" in cmd
 
 
-def test_darkcore_env_carries_pythonpath():
-    """cwd-independence: the darkcore package resolves via PYTHONPATH, and the
-    router's own paths are __file__-derived."""
+def test_darkcore_uses_own_venv_no_pythonpath():
+    """The router is a standalone uv project: darkcore is installed editable
+    in its venv (importable from any cwd) — no PYTHONPATH injection."""
     cfg = load_config()
     b = get_backend("darkcore", cfg)
-    assert b.extra_env().get("PYTHONPATH") == DARKCORE_DIR
+    assert "PYTHONPATH" not in b.extra_env()
+    assert ".venv" in cfg.runtimes["darkcore"].server.binary
 
 
 def test_darkcore_health_and_base_urls():

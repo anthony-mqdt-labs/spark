@@ -5,9 +5,11 @@ Session handoff snapshot. Overwrite at session end / before compaction.
 ## 2026-07-17 — darkcore runtime: spark OWNS the patchwork router (committed 3091a74)
 
 New pure-TOML runtime (`config/runtimes/darkcore.toml`, generic Backend):
-`spark darkcore-router` spawns `python -m darkcore.server` (mlx-lm tool env,
-PYTHONPATH → patchwork/experiments/router) under the supervisor — health-wait
-on `/health`, bounded restart, graceful SIGINT. Live-verified: ready in 3.0s,
+`spark darkcore-router` spawns `python -m darkcore.server` under the
+supervisor — health-wait on `/health`, bounded restart, graceful SIGINT.
+Binary = the router project's OWN venv python (experiments/router became a
+standalone uv project later the same day — `uv sync` there; no PYTHONPATH,
+darkcore installed editable). Live-verified: ready in 3.0s,
 real completion through the T0/T1/T2 cascade (response carries `patchwork`
 trace object + real usage — the router's new seam contract), SIGINT → child
 reaped, port free. 124 tests (5 new in test_darkcore_runtime.py).
