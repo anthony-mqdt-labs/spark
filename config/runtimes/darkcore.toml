@@ -1,0 +1,40 @@
+# dark-core — the patchwork dynamic router (T0/T1/T2 cascade) as a spark-
+# supervised child (integration seam 5, 2026-07-17).
+#
+# Unlike the relay backend (attach-only: spark can watch it but not restart
+# it), this runtime SPAWNS `python -m darkcore.server` under the supervisor:
+# health-wait, bounded restart+backoff on crash, graceful SIGINT — the router
+# becomes a first-class spark citizen while its code stays in patchwork.
+#
+# The interpreter is the mlx-lm uv-tool env (has mlx_lm + fastapi/uvicorn +
+# torch/transformers for the router's embedder). PYTHONPATH points at the
+# darkcore package checkout — the router's own paths (config, telemetry,
+# exemplars) are __file__-derived, so cwd never matters.
+#
+# NB detection: the detect binary IS an interpreter (no console-script
+# shebang), so [detect].python_requires would be inert here — the runtime's
+# deps are guaranteed by the mlx-lm tool env instead.
+name = "darkcore"
+description = "Patchwork dark-core dynamic router (verify-and-escalate cascade) as a supervised child."
+model_format = "any"
+requires_os = ["Darwin"]
+requires_arch = ["arm64"]
+install_hint = "Repo checkout at ../patchwork/experiments/router (no install; needs the mlx-lm uv tool env)."
+
+[detect]
+binary = "$(uv tool dir)/mlx-lm/bin/python"
+version_args = ["--version"]   # reports the interpreter; darkcore has no CLI --version probe
+version_package = "mlx-lm"
+
+[server]
+binary = "$(uv tool dir)/mlx-lm/bin/python"
+args_template = ["-m", "darkcore.server", "--host", "{host}", "--port", "{port}"]
+openai_compatible = true
+default_port = 8000
+health_path = "/health"
+# Startup pays config load + exemplar snapshot + embedder warm (~25 s
+# measured); generous headroom for a cold page cache.
+ready_timeout_s = 300.0
+
+[server.env]
+PYTHONPATH = "${DARKCORE_ROUTER_DIR}"
