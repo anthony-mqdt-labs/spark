@@ -1,0 +1,50 @@
+id: "0001"
+slug: "model-fleet-api"
+title: "Model Fleet API — sparkd serves a model selection, hands endpoints to consumers"
+state: "wip-research"   # NOT draft: no design.md yet; spikes S1-S5 gate it
+owner: "unassigned"
+created: "2026-07-18"
+updated: "2026-07-18"
+
+verifier:
+  kind: "none-yet"
+  command: ""
+  # A real verifier is only definable after S4 (residency contract) settles.
+  requires_tests: false
+
+depends_on: []
+external:
+  - repo: "../patchwork"
+    what: >
+      Consumer side: tier roster actuation via darkcore set_config (S5),
+      HTTP Tier backend per plans/generalized-router-interfaces.md,
+      Exp 4 / swap-econ baselines for spike S2.
+
+blocks: []
+targets:
+  - fleet-daemon
+paths:
+  - "src/spark/runner/**"
+  - "src/spark/registry/**"
+  - "src/spark/budget.py"
+  - "spikes/**"
+
+labels:
+  - "daemon"
+  - "serving"
+  - "research"
+
+metadata:
+  motivation: >
+    Spark becomes the machine's model-fleet authority: one resident owner of
+    "what is loaded", serving OpenAI-compatible endpoints and publishing them
+    to consumers through their own config channels. First consumer: the
+    darkcore router (tiers move from in-process mlx-lm to HTTP endpoints).
+  notes: >
+    WIP BY DESIGN (operator, 2026-07-18): research and spikes before any
+    design.md. Five gates: S1 daemon skeleton, S2 cross-process residency
+    economics (in-process Exp 4 numbers do not transfer), S3 HTTP tier
+    latency + failure modes, S4 residency-negotiation contract (the hard
+    core — paper spike), S5 roster-actuation dry run through set_config.
+    Open questions 1-5 in prd.md block design.md. Dark-operability stays a
+    router invariant: no-sparkd operation must keep working.

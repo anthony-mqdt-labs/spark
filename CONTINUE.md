@@ -2,6 +2,21 @@
 
 Session handoff snapshot. Overwrite at session end / before compaction.
 
+## 2026-07-18 — Spec 0001 opened: Model Fleet API (WIP-RESEARCH — do not implement)
+
+`specs/0001-model-fleet-api/` (prd.md + status.yaml): sparkd as the machine's
+model-fleet authority — resident daemon, job table of supervised model
+servers, endpoints handed to consumers via *their* config channels (first
+consumer: darkcore router tier roster via `set_config`). **State is
+wip-research by operator intent**: five spikes (S1 daemon skeleton, S2
+cross-process residency economics, S3 HTTP tier latency/failure modes,
+S4 residency-negotiation contract — the hard core, S5 roster actuation dry
+run) and five open questions gate any design.md. Reuse surface: supervisor,
+registry, budget.py, relay pattern. Router keeps in-process tiers as the
+dark-operable default. Cross-repo: patchwork
+`experiments/router/plans/generalized-router-interfaces.md` (Tier boundary),
+Exp 4 / BENCH-REPORT v0.2-mlx (eviction findings).
+
 ## 2026-07-17 — darkcore runtime: spark OWNS the patchwork router (committed 3091a74)
 
 New pure-TOML runtime (`config/runtimes/darkcore.toml`, generic Backend):
