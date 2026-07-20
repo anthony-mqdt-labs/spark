@@ -8,10 +8,11 @@ Session handoff snapshot. Overwrite at session end / before compaction.
 model-fleet authority — resident daemon, job table of supervised model
 servers, endpoints handed to consumers via *their* config channels (first
 consumer: darkcore router tier roster via `set_config`). **State is
-wip-research by operator intent**: five spikes (S1 daemon skeleton, S2
+wip-research by operator intent**: six spikes (S1 daemon skeleton, S2
 cross-process residency economics, S3 HTTP tier latency/failure modes,
 S4 residency-negotiation contract — the hard core, S5 roster actuation dry
-run) and five open questions gate any design.md. Reuse surface: supervisor,
+run, S6 embedder as first fleet tenant — run right after S1, cheapest
+end-to-end falsification) and four open questions gate any design.md. Reuse surface: supervisor,
 registry, budget.py, relay pattern. Router keeps in-process tiers as the
 dark-operable default. Cross-repo: patchwork
 `experiments/router/plans/generalized-router-interfaces.md` (Tier boundary),

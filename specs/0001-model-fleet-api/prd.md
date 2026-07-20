@@ -104,6 +104,25 @@ numbers (S2).
       through darkcore `set_config` pointing one tier at an S1 endpoint;
       verify conflict behavior, journal entry, and router pickup without
       restart. Proves the handoff channel end-to-end before any glue code.
+- [ ] **S6 — Embedder as first fleet tenant** (promoted from open question 5,
+      operator 2026-07-18). Serve the mlx bge-small embedder
+      (`patchwork/experiments/router/darkcore/embedder_mlx.py`) as a sparkd
+      endpoint (`POST /embed`, ~33 M params — no OpenAI server exists for
+      encoder-only, so this is a ~50-line loopback wrapper) and point the
+      router's predictor at it behind a fallback-to-in-process switch. Why
+      the embedder makes the ideal first tenant: it is the component whose
+      residency keeps being violated by forces outside its own process
+      (BENCH-REPORT v0.2-mlx: the 27B evicts it, mlx or not), it is tiny
+      (cheap to be wrong about), and it exercises the full ensure/release
+      contract — spark must keep it warm *through* a T2 climb, which is the
+      exact negotiation S4 must solve, at 1/200th the weight of a real tier.
+      Measures: embed latency via HTTP vs in-process (baseline 9.4 ms warm,
+      fixtures/embedder-parity timings), post-T2-climb latency (does spark
+      ownership beat the 22.31 ms rewarm?), and parity (the frozen reference
+      vectors gate the served path exactly as they gated the port).
+      **Sequencing: run S6 right after S1** — it is the smallest end-to-end
+      proof of the whole idea, and an S6 failure is the cheapest possible
+      falsification of fleet serving on this box.
 
 ## 6. Router-side work (tracked here, implemented in patchwork)
 
@@ -128,10 +147,11 @@ numbers (S2).
    operationally right answer and the implementation-expensive one.)
 4. Multi-consumer fairness: first-come or priority classes? (Defer until a
    second real consumer exists; note it in S4.)
-5. Does the embedder (33 M, now mlx) belong in the fleet as a served
-   endpoint, or stay in-process in the router forever? (Fleet membership
-   would make its eviction spark's problem — attractive after the v0.2-mlx
-   finding.)
+5. ~~Does the embedder belong in the fleet as a served endpoint?~~ —
+   PROMOTED to spike S6 (operator, 2026-07-18): the embedder is the first
+   fleet tenant; its eviction becomes spark's problem. The residual open
+   part: if S6 succeeds, does the in-process embedder path stay as the
+   dark-operable fallback forever (leaning yes — same invariant as tiers)?
 
 ## 8. Non-goals (v1)
 
