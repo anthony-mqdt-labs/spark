@@ -45,7 +45,7 @@ spark list | grep router
 
 Example (patchwork router):
 ```bash
-cd ../patchwork/experiments/router
+cd "$DARKCORE_ROUTER_DIR"   # the router project's root on your machine
 MLXPY=$(uv tool dir)/mlx-lm/bin/python
 $MLXPY -m darkcore.server --port 8000
 ```

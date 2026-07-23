@@ -17,6 +17,9 @@ logs/
 # OS
 .DS_Store
 
+# local Claude Code project state
+.claude/
+
 # Secrets must never be committed. Secrets live in the macOS Keychain, never in
 # the repo. This is a belt-and-suspenders guard against accidental key files.
 *.key

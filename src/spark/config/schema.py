@@ -7,15 +7,24 @@ or an injected key in a config file is a hard error, not silent behavior.
 
 from __future__ import annotations
 
+import os
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 ModelFormat = Literal["mlx", "mlx-vlm", "gguf", "ollama", "safetensors", "any"]
 
 
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=False)
+
+
+def _expand_binary(v: str) -> str:
+    """Expand ``~`` and ``$VAR``/``${VAR}`` so runtime defs can reference
+    machine-specific paths (e.g. a sibling project's venv) without hardcoding
+    them in checked-in TOML. Bare command names (resolved on PATH) pass through
+    unchanged."""
+    return os.path.expandvars(os.path.expanduser(v))
 
 
 class DetectSpec(_Strict):
@@ -36,6 +45,11 @@ class DetectSpec(_Strict):
     # are 'module' or 'module:pip-package' when the import name differs from the
     # PyPI name (e.g. 'PIL:pillow') — the mapping is always declared, never guessed.
     python_requires: list[str] = Field(default_factory=list)
+
+    @field_validator("binary")
+    @classmethod
+    def _expand(cls, v: str) -> str:
+        return _expand_binary(v)
 
 
 class ServerSpec(_Strict):
@@ -66,6 +80,11 @@ class ServerSpec(_Strict):
     relay_base_url: str = ""
     # Health endpoint path on the external relay service (default "/health").
     relay_health_endpoint: str = "/health"
+
+    @field_validator("binary")
+    @classmethod
+    def _expand(cls, v: str) -> str:
+        return _expand_binary(v)
 
 
 class RuntimeDef(_Strict):

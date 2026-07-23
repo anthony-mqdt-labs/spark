@@ -12,6 +12,11 @@
 # changes with `uv sync` in that directory. The router's paths (config,
 # telemetry, exemplars) are __file__-derived, so cwd never matters.
 #
+# The router's checkout location is host-specific (it's a sibling project,
+# not vendored here), so its venv path is NOT hardcoded in this bundled
+# config — set $DARKCORE_ROUTER_DIR to the router project's root, or override
+# [runtimes.darkcore].detect.binary / .server.binary in your user config.toml.
+#
 # NB detection: the detect binary IS an interpreter (no console-script
 # shebang), so [detect].python_requires would be inert here — the runtime's
 # deps are guaranteed by the router project's uv.lock instead.
@@ -20,7 +25,7 @@ description = "Patchwork dark-core dynamic router (verify-and-escalate cascade) 
 model_format = "any"
 requires_os = ["Darwin"]
 requires_arch = ["arm64"]
-install_hint = "cd ../patchwork/experiments/router && uv sync   (standalone uv project)"
+install_hint = "set $DARKCORE_ROUTER_DIR to the router's project root, then `cd $DARKCORE_ROUTER_DIR && uv sync`   (standalone uv project)"
 
 [detect]
 binary = "${DARKCORE_ROUTER_DIR}/.venv/bin/python"

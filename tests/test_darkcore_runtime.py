@@ -4,11 +4,21 @@ Pure-TOML runtime (generic Backend): these tests pin the launch contract so
 config drift breaks loudly, not at 2am mid-route."""
 from __future__ import annotations
 
+import pytest
+
 from spark.config.loader import load_config
 from spark.config.schema import ModelEntry
 from spark.runtimes import get_backend
 
-ROUTER_PY = "${DARKCORE_ROUTER_DIR}/.venv/bin/python"
+FAKE_ROUTER_DIR = "/tmp/fake-darkcore-router"
+ROUTER_PY = f"{FAKE_ROUTER_DIR}/.venv/bin/python"
+
+
+@pytest.fixture(autouse=True)
+def _router_dir_env(monkeypatch):
+    """binary paths are ${DARKCORE_ROUTER_DIR}-templated (config is host-agnostic);
+    tests supply a fake value rather than depending on the real host layout."""
+    monkeypatch.setenv("DARKCORE_ROUTER_DIR", FAKE_ROUTER_DIR)
 
 
 def _entry() -> ModelEntry:
