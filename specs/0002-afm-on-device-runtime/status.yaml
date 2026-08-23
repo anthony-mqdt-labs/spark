@@ -1,0 +1,59 @@
+id: "0002"
+slug: "afm-on-device-runtime"
+title: "AFM On-Device Runtime — Apple Foundation Models (AFM 3 Core) as a supervised spark runtime"
+state: "wip-research"   # NOT draft: proposal only; spikes A1-A4 gate it
+owner: "unassigned"
+created: "2026-08-23"
+updated: "2026-08-23"
+
+verifier:
+  kind: "none-yet"
+  command: ""
+  # Only definable after A1 (availability/context) + A2 (entitlement) land.
+  requires_tests: false
+
+depends_on: []
+external:
+  - repo: "apple-os"
+    what: >
+      The bridge target is the OS's own FoundationModels framework
+      (Swift, entitlement com.apple.developer.intelligence). Model weights
+      are system assets (UAF_FM_GenerativeModels), not spark downloads.
+      Apple Intelligence opt-in must be enabled by the operator before
+      anything is testable.
+
+blocks: []
+targets: []
+paths:
+  - "config/runtimes/afm.toml"
+  - "src/spark/runtimes/**"
+  - "src/spark/registry/**"
+  - "src/spark/budget.py"
+  - "spikes/**"
+
+labels:
+  - "runtime"
+  - "apple"
+  - "on-device"
+  - "proposal"
+
+metadata:
+  motivation: >
+    Spark fronts every local runtime except the one Apple ships in the OS.
+    AFM 3 Core (~3B, preinstalled ~2.34 GB, 'never remove' system assets)
+    is a private, zero-download, OS-managed model; the only API is the
+    Swift FoundationModels framework. A darkcore-style supervised Swift
+    bridge would make it a first-class spark model. Trade-off is explicit:
+    quality ≈ Qwen-2.5-3B class (below the Qwen-3-4B already served via
+    mlx_lm); the 20B AFM 3 Core Advanced is not eligible on this M2.
+  notes: >
+    FEATURE PROPOSAL (operator, 2026-08-23). Hard gates verified on this
+    host: (1) Apple Intelligence opt-in is FALSE — daemon-log evidence;
+    everything else is downstream. (2) Entitlement com.apple.developer.
+    intelligence on an ad-hoc binary is unverified — the highest-uncertainty
+    technical risk (A2). (3) Live FoundationModels invocation trips a system
+    consent gate (observed). (4) Gen-3 context size unpublished; lineage
+    says 32K-65K; A1 measures SystemLanguageModel.contextSize for real.
+    If A1-A2 fail, the feature dies cheaply — that is the point of the
+    spike order. No spark-core Python changes expected (darkcore precedent:
+    zero Backend subclass, pure TOML + external binary).
