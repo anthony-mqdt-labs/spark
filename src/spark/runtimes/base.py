@@ -71,6 +71,18 @@ class Backend:
     def openai_compatible(self) -> bool:
         return self.rt.server.openai_compatible
 
+    @property
+    def requires_local_weights(self) -> bool:
+        """Whether spark must find this model's weights on disk before launching."""
+        return self.rt.requires_local_weights
+
+    # Whether the runtime's HTTP surface comes up *before* its model is resident
+    # (mlx_lm/mlx_vlm do: they load lazily on the first request, and answer
+    # /v1/models from a cache scan without loading anything). When True, the
+    # supervisor confirms readiness with a real generation rather than trusting
+    # the health endpoint.
+    lazy_loads_model: bool = False
+
     # -- model resolution ------------------------------------------------------
     def resolve_model_ref(self, entry: ModelEntry) -> str:
         """The string handed to the runtime as the model. Local path preferred;
@@ -129,6 +141,53 @@ class Backend:
 
     def ready_timeout_s(self) -> float:
         return self.rt.server.ready_timeout_s
+
+    # -- readiness --------------------------------------------------------------
+    def warmup(
+        self, entry: ModelEntry, host: str, port: int, timeout_s: float
+    ) -> tuple[bool, str]:
+        """Force one minimal generation so a lazy runtime actually loads the model.
+
+        Returns ``(ok, detail)`` and never raises: the supervisor turns a False
+        into a launch failure (restart, then an actionable terminal error), which
+        is the only way to notice a server that answers HTTP while being unable
+        to produce a token. Backends with eager loading never call this.
+        """
+        if not self.openai_compatible:
+            return True, "warmup not applicable (non-OpenAI runtime)"
+
+        import json
+        import urllib.error
+        import urllib.request
+
+        url = f"{self.openai_base_url(host, port)}/chat/completions"
+        payload = {
+            "model": self.resolve_model_ref(entry),
+            "messages": [{"role": "user", "content": "ping"}],
+            "max_tokens": 1,
+            "temperature": 0,
+        }
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode(),
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
+                if not 200 <= resp.status < 300:
+                    return False, f"HTTP {resp.status}"
+                return True, "generated" if resp.read(4096) else "empty response"
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = exc.read(400).decode(errors="replace").strip()
+            except Exception:  # noqa: BLE001 - diagnostics only
+                pass
+            return False, f"HTTP {exc.code}{': ' + detail if detail else ''}"
+        except Exception as exc:  # noqa: BLE001 - any failure means "not ready"
+            return False, f"{type(exc).__name__}: {exc}"
+
 
 
 # --- registry ------------------------------------------------------------------

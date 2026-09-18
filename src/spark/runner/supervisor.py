@@ -31,13 +31,16 @@ from ..config.paths import SparkPaths
 from ..config.schema import ModelEntry, SparkConfig
 from ..errors import (
     HealthCheckError,
+    InsufficientDiskError,
     InsufficientMemoryError,
     LaunchError,
     ModelNotFoundError,
     PortInUseError,
     RecoveryExhaustedError,
+    WeightsMissingError,
 )
 from ..probe.host import HostProfile
+from ..registry.availability import MISSING, resolve_availability
 from ..runtimes.base import Backend
 from ..secrets.store import SecretStore
 from ..telemetry import get_telemetry
@@ -144,6 +147,20 @@ class Supervisor:
     def _preflight(self) -> int:
         host = self.config.general.host
 
+        # Weights: are they on this host at all? Repeated here (not just in
+        # `spark list`) because a launch is where absent weights turn into a
+        # multi-GB fetch *after* the health gate has already passed.
+        avail = resolve_availability(
+            self.entry,
+            self.paths,
+            requires_weights=self.backend.requires_local_weights,
+        )
+        self.log.info(
+            "supervisor", "weights_check",
+            model=self.entry.id, state=avail.state,
+            detail=avail.detail, location=avail.location,
+        )
+
         # Local model path must exist (HF repo ids are allowed to be remote).
         ref = self.backend.resolve_model_ref(self.entry)
         if ("/" in ref and Path(ref).expanduser().is_absolute()) or ref.startswith("."):
@@ -153,9 +170,30 @@ class Supervisor:
                     remediation=[
                         "Re-download: spark download <hf-repo>",
                         f"Check the registry entry for '{self.entry.id}'.",
+                        f"Or drop the entry: spark forget {self.entry.id}",
                     ],
                     context={"path": ref},
                 )
+
+        if avail.state == MISSING and not self.force:
+            # Refuse rather than let the runtime fetch it invisibly: the fetch
+            # happens on the first request, long after spark has declared the
+            # server ready, so a failed/slow download surfaces as a server that
+            # answers /v1/models and /health and then never produces a token.
+            raise WeightsMissingError(
+                f"'{self.entry.id}' has no weights on this host ({avail.detail}).",
+                remediation=[
+                    f"Fetch + register them: spark download {self.entry.hf_repo or '<hf-repo>'}",
+                    "Then launch again — this also records the size for the disk gate.",
+                    f"Or drop the entry: spark forget {self.entry.id}",
+                    "Override the refusal (let the runtime fetch at first request): --force"
+                    "  (the disk floor still applies)",
+                ],
+                context={
+                    "model": self.entry.id, "state": avail.state,
+                    "detail": avail.detail, "repo": self.entry.hf_repo,
+                },
+            )
 
         # Memory budget.
         mem = check_memory(self.entry, self.profile, self.config.memory)
@@ -171,9 +209,33 @@ class Supervisor:
                 context={"detail": mem.detail},
             )
 
-        # Disk headroom (weights already on disk; this guards swap/scratch space).
-        disk = check_disk(self.paths.data_dir, 0, self.config.disk)
-        self.log.info("supervisor", "disk_check", ok=disk.ok, detail=disk.detail)
+        # Disk headroom. Enforced whenever this launch can WRITE: absent weights
+        # mean the runtime may fetch them, so the policy's floor is a hard gate
+        # (a 27B fetch into ~4 GiB free filled the volume and killed the server
+        # mid-download). With weights local nothing new is written, so the same
+        # reading is advisory — being low on disk should not block a run.
+        need_bytes = (self.entry.size_bytes or 0) if avail.state == MISSING else 0
+        disk = check_disk(self.paths.data_dir, need_bytes, self.config.disk)
+        self.log.info(
+            "supervisor", "disk_check", ok=disk.ok, detail=disk.detail,
+            will_fetch=avail.state == MISSING, need_bytes=need_bytes,
+        )
+        if not disk.ok:
+            if avail.state == MISSING and self.config.disk.enforce:
+                # Deliberately NOT overridable with --force: --force is for risk
+                # preferences (memory headroom), not for a volume that is out of
+                # space — refusing here is the whole point. The deliberate way to
+                # fetch onto a tight disk is `spark download --force`, which names
+                # the intent at the moment of the download.
+                raise InsufficientDiskError(
+                    f"Launch would fetch weights onto a nearly-full disk ({disk.detail}).",
+                    remediation=self._free_space_steps(),
+                    context={"detail": disk.detail, "model": self.entry.id},
+                )
+            self.log.warn(
+                "supervisor", "disk_low", detail=disk.detail,
+                model=self.entry.id, enforced=False,
+            )
 
         # Port. Daemon-style (attach) backends live on a fixed port; do not
         # reassign it just because the daemon is already listening there.
@@ -182,6 +244,19 @@ class Supervisor:
         lo, hi = self.config.general.port_range
         port = _pick_port(host, self.backend.default_port, lo, hi)
         return port
+
+    def _free_space_steps(self) -> list[str]:
+        """How to make room, concretely — the failure this repo keeps hitting."""
+        from ..budget import free_disk_bytes
+
+        free_gib = free_disk_bytes(self.paths.data_dir) / 2**30
+        return [
+            f"Free space: need {self.config.disk.min_free_gib:g} GiB free, have {free_gib:.1f} GiB.",
+            "Large regenerable caches here: Model caches under ~/.cache/huggingface,",
+            "  ~/.cache/uv, and build trees (cargo target/).",
+            "Then re-run — or `spark forget <model>` to drop entries you no longer want.",
+        ]
+
 
     # -- env -------------------------------------------------------------------
     def _child_env(self) -> dict[str, str]:
@@ -237,6 +312,40 @@ class Supervisor:
             ],
             context={"url": url, "timeout_s": timeout_s},
         )
+
+    # -- readiness --------------------------------------------------------------
+    def _verify_generation(self, host: str, port: int) -> None:
+        """Confirm the server can actually produce a token before calling it ready.
+
+        Lazy runtimes (mlx_lm/mlx_vlm) bring up their HTTP surface before the
+        model is resident, and their health path answers from an HF-cache scan —
+        so a passing probe says nothing about residency. Without this check a
+        server whose model failed to load (or is quietly fetching gigabytes) is
+        reported ready indefinitely: the process never exits, so the
+        crash-restart path never fires, and every request hangs.
+        """
+        if not self.config.supervisor.verify_generation:
+            return
+        if not self.backend.lazy_loads_model or self.backend.attach_if_running:
+            return  # eager loader, or a shared daemon whose roster is not ours
+
+        timeout = self.backend.ready_timeout_s()
+        ok, detail = self.backend.warmup(self.entry, host, port, timeout)
+        self.log.info(
+            "supervisor", "warmup", ok=ok, detail=detail,
+            model=self.entry.id, timeout_s=timeout,
+        )
+        if not ok:
+            raise LaunchError(
+                f"'{self.entry.id}' answered health but produced no tokens ({detail}).",
+                remediation=[
+                    f"See the server log: {self._log_path}",
+                    "A download failure in that log means disk space, not spark — "
+                    "free room, then fetch deliberately with `spark download <hf-repo>`.",
+                    "Skip this gate with supervisor.verify_generation=false.",
+                ],
+                context={"detail": detail, "model": self.entry.id},
+            )
 
     # -- monitor ---------------------------------------------------------------
     def _monitor(self, url: str) -> str:
@@ -367,6 +476,7 @@ class Supervisor:
             self._spawn(cmd, env)
             try:
                 self._wait_ready(url, self.backend.ready_timeout_s())
+                self._verify_generation(host, port)
             except (LaunchError, HealthCheckError) as exc:
                 self._terminate()
                 if attempt < max_restarts and not self._stop.is_set():

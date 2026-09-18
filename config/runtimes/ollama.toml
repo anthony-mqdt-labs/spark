@@ -4,6 +4,9 @@
 name = "ollama"
 description = "Ollama server (convenience backend, own model store)."
 model_format = "ollama"
+# Weights live in ollama's own store and are pulled by `prepare`; spark's
+# registry knows only the tag, so its launch preflight has nothing to verify.
+requires_local_weights = false
 requires_os = ["Darwin", "Linux"]
 install_hint = "brew install ollama   (then: ollama serve)"
 

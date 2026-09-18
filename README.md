@@ -96,7 +96,8 @@ spark research <model>         # (re-)run the research chain for a registered mo
 spark config review <model> [--accept|--reject]   # apply/discard staged research
 spark config import <model>    # import research JSON from stdin (manual path)
 spark doctor                   # probe host + runtime availability + budgets
-spark list                     # list models
+spark list                     # list models (+ weight availability)
+spark forget <model>           # remove a registry entry (weights untouched)
 spark secret set|ls|rm|get <name>                 # macOS Keychain vault
 spark config validate|path|show                   # inspect configuration
 spark completion zsh           # emit the zsh completion function
@@ -170,12 +171,19 @@ load_or_probe(config, host_profile)      # probe: cached host.toml or fresh dete
 select_backend_for(entry, cfg, available)# registered backend, else preference order, format-compatible
 get_backend(name, cfg)                   # runtimes registry → Backend subclass
 Supervisor(backend, entry, cfg, profile, paths, secrets).run()
-  → preflight: model-path exists? mem budget? disk? free port (or fixed daemon port)
+  → preflight: weights present? mem budget? disk? free port (or fixed daemon port)
+      · weights (registry vs. disk): a launch whose entry asserts weights that are
+        absent is REFUSED (MODEL_WEIGHTS_MISSING) unless --force — otherwise the
+        runtime silently fetches GBs at the first request, behind a health gate
+        that has already passed.
+      · disk: enforced when the launch can write (absent weights / forced fetch),
+        advisory when the weights are already local — a tight disk must not block
+        a run that writes nothing.
   → backend.prepare(entry)               # e.g. ollama: ensure daemon + pull tag
   → attach-mode? if daemon already healthy → monitor without owning
   → build_launch_cmd(entry, host, port)  # template ⊕ resolved model ⊕ override flags
   → child env = os.environ ⊕ extra_env ⊕ resolved secret_env (values injected here only)
-  → spawn → wait_ready (poll health_url) → monitor (RSS sampling)
+  → spawn → wait_ready (poll health_url) → verify_generation → monitor (RSS sampling)
   → on crash: restart with exp backoff up to max_restarts → else RecoveryExhausted
   → SIGINT/SIGTERM: graceful terminate (SIGTERM → grace → SIGKILL)
 ```
@@ -193,6 +201,30 @@ perform_research(ctx, entry)             # unless --no-research / research.enabl
   → stage(paths, id, output, provider)   # data/staging/<id>.json  (awaiting review)
 spark config review <id> --accept        # apply_output_to_entry → save_model → status=registered
 ```
+
+### Readiness: "answers HTTP" is not "can generate"
+
+`mlx_lm.server` / `mlx_vlm.server` bind their port **before** the model is
+resident, and answer `/v1/models` from an HF-cache scan — so a passing health
+probe says nothing about the model. spark therefore issues one minimal
+generation (`Backend.warmup`, 1 token) after the health check and before
+declaring the server ready (`supervisor.verify_generation`, default on; skipped
+for eager loaders and attached daemons). Without it, a runtime whose model load
+crashed stays "ready" forever: the process never exits, so the crash-restart
+path never fires and every request hangs. Verified live: a dead generator thread
+answered `/v1/models` and `/health` with 200 while producing no tokens.
+
+### Weights: one availability contract, three consumers
+
+`registry/availability.py` reconciles each entry against the filesystem —
+`local` (spark store), `hub` (HF hub cache, resolved through `hf_cache.py`, the
+same rule the omlx backend uses), `missing` (the entry asserts weights that are
+not here), `external` (runtime-owns-its-weights: router child, ollama daemon,
+relay — declared per runtime via `requires_local_weights`), `unverifiable`
+(nothing asserted). `spark list`, `spark __complete`, and the launch preflight
+all read it, so they cannot disagree; `spark forget <model>` is the way to drop
+an entry whose weights are gone.
+
 
 ---
 
@@ -393,6 +425,21 @@ The fuzzy `spark <Tab>` menu depends on a chain of files **outside this repo**:
   header** — deliberately, so research can never leak a token. Keep it that way.
 - **llama.cpp `-hf`**: `llama-server` itself downloads GGUF from HF when given
   `-hf user/repo[:quant]`. That network call happens inside llama-server, not spark.
+- **The hub cache is read by TWO different lists, and they disagree.** spark's
+  registry (`models/*.toml`) is one namespace; `mlx_lm.server`'s `/v1/models` is
+  another — it scans `scan_cache_dir()` and returns every *cached MLX-shaped repo*
+  plus the loaded model if `--model` is an existing path. Agent harnesses read the
+  second, spark reads the first, and neither sees the other. Consequences to
+  respect when touching either side:
+    · a model downloaded by `spark download` into `store/` is **invisible** to
+      harnesses (it is not a hub-cache repo), and appears at the endpoint only as
+      an absolute path while it is loaded;
+    · reclaiming a hub-cache repo removes it from every harness while the registry
+      entry keeps advertising it — which is why the registry is reconciled against
+      disk (`registry/availability.py`) and `spark list` shows an `avail` column;
+    · `hf cache prune` **cannot** delete a repo whose `snapshots/` dir is gone (verified);
+      a half-reclaimed repo is invisible to `hf cache ls` and inert to `prune`, so it
+      has to be cleaned by hand.
 
 ### 9.5 macOS Keychain / Security.framework
 - Secrets use `SecKeychainAddGenericPassword` / `…FindGenericPassword` /
@@ -508,8 +555,10 @@ fields `ts, level, component, event, session_id, pid`; daily rotation; 7-day
 retention; secret redaction; a ring buffer of recent events attached as
 `context_window` on crash events. Logging must never crash the program (IO errors
 are swallowed). A well-logged failure should be diagnosable from the file alone —
-e.g. supervisor logs `process_start`, `server_ready` (with port/endpoint),
-`process_crash`, `restart_scheduled`, `process_exit` (wall time, peak RSS).
+e.g. supervisor logs `weights_check` (availability state + location),
+`disk_check` (with `will_fetch`/`need_bytes`), `process_start`,
+`server_ready` (with port/endpoint), `warmup` (the generation-verified readiness
+result), `process_crash`, `restart_scheduled`, `process_exit` (wall time, peak RSS).
 
 ---
 

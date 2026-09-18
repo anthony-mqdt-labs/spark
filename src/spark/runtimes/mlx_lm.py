@@ -12,6 +12,12 @@ from .base import Backend, register
 
 @register("mlx_lm")
 class MlxLmBackend(Backend):
+    # mlx_lm.server starts listening before the model is resident and loads it
+    # on the first request — so spark must verify a real generation, not just a
+    # health response, before calling it ready.
+    lazy_loads_model = True
+
     def resolve_model_ref(self, entry: ModelEntry) -> str:
         # mlx_lm.server accepts a local path OR a HF repo id for --model.
         return entry.path or entry.hf_repo or entry.id
+

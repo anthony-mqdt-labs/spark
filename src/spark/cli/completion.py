@@ -24,14 +24,15 @@ _ZSH_COMPLETION = r"""#compdef spark
 _spark() {
   local -a subcmds
   subcmds=(
-    'run:Launch the optimal runtime for a model'
-    'download:Download + register a Hugging Face model'
-    'research:Research optimal config for a registered model'
-    'doctor:Probe host capabilities and runtimes'
-    'list:List registered models'
-    'secret:Manage secrets (macOS Keychain)'
-    'config:Inspect and validate configuration'
-    'completion:Emit shell completion'
+      'run:Launch the optimal runtime for a model'
+      'download:Download + register a Hugging Face model'
+      'research:Research optimal config for a registered model'
+      'doctor:Probe host capabilities and runtimes'
+      'list:List registered models'
+      'forget:Remove a model from the registry'
+      'secret:Manage secrets (macOS Keychain)'
+      'config:Inspect and validate configuration'
+      'completion:Emit shell completion'
   )
 
   local -a models
@@ -47,7 +48,7 @@ _spark() {
   fi
 
   case "${words[2]}" in
-    run|download|research)
+    run|download|research|forget)
       _describe -t models 'model' models ;;
     secret)
       _values 'secret command' set ls rm get ;;
@@ -77,22 +78,36 @@ def complete_command(what: str, arg: str | None):
     try:
         paths = resolve_paths()
         if what == "models":
+            # Availability is computed without walking weights (`with_bytes=False`)
+            # and without loading config: this path must stay fast and offline
+            # (README §9.3). A MISSING marker here means the entry asserts weights
+            # that are absent — the one signal a consumer must not offer as runnable.
+            from ..registry.availability import MISSING, resolve_availability
+
             for m in list_models(paths):
                 desc = " · ".join(
                     x for x in (m.backend, m.quant, m.model_format) if x
                 ) or "model"
+                a = resolve_availability(m, paths, with_bytes=False)
+                if a.state == MISSING:
+                    desc = f"{desc} · MISSING WEIGHTS"
                 sys.stdout.write(f"{m.id}\t{desc}\n")
         elif what == "describe" and arg:
+            from ..registry.availability import resolve_availability
+
             m = resolve_model(arg, paths)
+            a = resolve_availability(m, paths)
             lines = [
                 f"id:       {m.id}",
                 f"backend:  {m.backend or '—'}",
                 f"format:   {m.model_format}",
                 f"quant:    {m.quant or '—'}",
                 f"repo:     {m.hf_repo or '—'}",
+                f"weights:  {a.describe()}",
                 f"status:   {m.research_status}",
             ]
             sys.stdout.write("\n".join(lines) + "\n")
     except Exception:
         # Completion must never surface errors into the shell.
         return
+

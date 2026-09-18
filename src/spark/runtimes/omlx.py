@@ -8,42 +8,21 @@ single symlink named after the model id, and points ``--model-dir`` at it; clien
 then address the model by that id.
 
 Weights must already be local: either ``entry.path`` (set by ``spark download``)
-or the HF hub cache for ``hf_repo``-only entries. If neither resolves, the launch
-aborts with remediation rather than silently serving nothing.
+or the HF hub cache for ``hf_repo``-only entries (resolved through
+:mod:`spark.hf_cache`, the same rule the registry's availability check uses). If
+neither resolves, the launch aborts with remediation rather than silently
+serving nothing.
 """
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from ..config.paths import resolve_paths
 from ..config.schema import ModelEntry
 from ..errors import RuntimeBackendError
+from ..hf_cache import snapshot_dir as _hf_cache_snapshot
 from .base import Backend, register
-
-
-def _hf_cache_snapshot(repo: str) -> Path | None:
-    """Resolve a repo id to its local snapshot dir in the HF hub cache, or None."""
-    if not repo:
-        return None
-    if os.environ.get("HF_HUB_CACHE"):
-        root = Path(os.environ["HF_HUB_CACHE"])
-    elif os.environ.get("HF_HOME"):
-        root = Path(os.environ["HF_HOME"]) / "hub"
-    else:
-        root = Path.home() / ".cache" / "huggingface" / "hub"
-    snaps = root / ("models--" + repo.replace("/", "--")) / "snapshots"
-    if not snaps.is_dir():
-        return None
-    # Prefer the commit pinned by refs/main; fall back to newest valid snapshot.
-    ref = snaps.parent / "refs" / "main"
-    if ref.is_file():
-        pinned = snaps / ref.read_text().strip()
-        if (pinned / "config.json").is_file():
-            return pinned
-    valid = [d for d in snaps.iterdir() if (d / "config.json").is_file()]
-    return max(valid, key=lambda p: p.stat().st_mtime) if valid else None
 
 
 @register("omlx")

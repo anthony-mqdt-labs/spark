@@ -22,6 +22,8 @@
 name = "relay"
 description = "Relay backend for proxying to external OpenAI-compatible services."
 model_format = "any"
+# Requests go to a remote service; it owns whatever weights it serves.
+requires_local_weights = false
 
 [detect]
 # Relay has no local binary to detect; this is a placeholder.

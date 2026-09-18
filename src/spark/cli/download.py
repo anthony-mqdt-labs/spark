@@ -291,6 +291,10 @@ def download_command(
         model_format=inferred["model_format"],
         quant=inferred["quant"],
         params_billions=inferred["params_billions"],
+        # Recorded so the launch path can price a re-fetch after the weights are
+        # reclaimed: the disk gate needs a real number when nothing is on disk,
+        # and the HF API is not consulted at launch time.
+        size_bytes=_dir_bytes(Path(path)) if path else None,
         research_status="pending",
     )
     save_model(entry, ctx.paths)
@@ -303,7 +307,6 @@ def download_command(
     if no_research or not ctx.config.research.enabled:
         console.print(f"[dim]research skipped[/dim] — run later: spark research {mid}")
         return
-    from ..errors import SparkError
     from .research import perform_research
 
     try:

@@ -2,6 +2,45 @@
 
 Session handoff snapshot. Overwrite at session end / before compaction.
 
+## 2026-09-18 — phantom models + zombie servers: availability, disk gate, warmup
+
+Diagnosed from a live incident, then fixed all three:
+
+- **`spark list` advertised models whose weights were gone.** `list_models()` read
+  registry TOMLs only; `scan_store()` looked at store *directories* and could not
+  see `hf_repo`-backed entries (the Ornith precedent) or the hub cache at all. Now
+  `registry/availability.py` reconciles every entry against disk (local / hub /
+  missing / external / unverifiable) and is shared by `spark list` (new `avail`
+  column + warning block), `spark __complete` (MISSING WEIGHTS marker; byte walk
+  skipped to keep Tab fast), and the launch preflight. New `spark forget <model>`
+  drops a stale entry; `hf_cache.py` is the single hub-cache rule (omlx now shares it).
+- **A launch could silently fetch GBs.** `resolve_model_ref` hands the runtime a
+  repo id; the fetch happens on the *first request*, after the health gate passed.
+  Observed: `spark ternary-bonsai-27b-mlx-2bit` on a volume with 4.6 GiB free →
+  fetch died at 38 % (`Xet … Background writer channel closed`) → the exception
+  killed mlx_lm's generator thread → `/v1/models` and `/health` kept answering 200
+  while every completion hung, and the supervisor (which only reacts to process
+  exit) reported it healthy. Now: missing weights are REFUSED
+  (`MODEL_WEIGHTS_MISSING`) unless `--force`, and the disk floor is a hard gate
+  whenever a launch can write (`[disk] enforce` was previously logged, never enforced,
+  and always called with `need_bytes=0`). Low disk stays advisory for local runs.
+- **Readiness now requires residency.** `mlx_lm`/`mlx_vlm` are marked
+  `lazy_loads_model`; after the health probe the supervisor issues a 1-token
+  generation (`Backend.warmup`, `supervisor.verify_generation`) and treats failure
+  as a launch failure → restart → actionable terminal error. Verified live: local
+  weights, `warmup ok=true` in 6.1 s, real completion served; run refused cleanly
+  for the weightless 27B.
+
+Also fixed in passing: `cli/download.py` re-imported `SparkError` inside
+`download_command`, making the module-level name local — the "hf CLI not found"
+fail state would have raised `UnboundLocalError` instead of its remediation.
+
+Host note: the HF hub cache lost `mlx-community/MiniCPM5-1B-8bit` (1.1 GB) some
+time between 2026-09-17 18:41 and 2026-09-18 12:04 — *before* any cache command of
+this session. Verified experimentally that `hf cache prune` cannot remove a repo
+whose `snapshots/` dir is gone, and the only deletion performed was the explicit
+29 MB 27B remnant; the actor is unknown. Re-fetch when there is disk room.
+
 ## 2026-07-18 — Spec 0001 opened: Model Fleet API (WIP-RESEARCH — do not implement)
 
 `specs/0001-model-fleet-api/` (prd.md + status.yaml): sparkd as the machine's

@@ -101,6 +101,11 @@ class RuntimeDef(_Strict):
     # Shown when unavailable, to guide the operator.
     install_hint: str = ""
     unavailable_reason: str = ""
+    # Whether this runtime needs spark-visible weights on disk to serve a model.
+    # True for inference runtimes; False for runtimes that own their weights
+    # (the darkcore router child, ollama's own daemon store, relays to a remote
+    # service) — the launch preflight must not demand weights those never use.
+    requires_local_weights: bool = True
 
 
 class MemoryPolicy(_Strict):
@@ -150,6 +155,13 @@ class SupervisorPolicy(_Strict):
     backoff_max_s: float = 30.0
     health_interval_s: float = 5.0
     shutdown_grace_s: float = 10.0
+    # After the health endpoint answers, force one minimal generation before
+    # declaring the server ready. Lazy-loading runtimes (mlx_lm/mlx_vlm) start
+    # their HTTP surface *before* the model is resident, and their /v1/models
+    # answers from an HF-cache scan without loading anything — so a health probe
+    # alone cannot tell "serving" from "merely breathing". A warmup generation
+    # is the only honest readiness signal for them.
+    verify_generation: bool = True
 
 
 class ResearchProviderDef(_Strict):

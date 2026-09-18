@@ -94,13 +94,64 @@ def render_store_issues(issues) -> None:
         console.print(f"    resume: [bold]{resume}[/bold]  ·  clean: rm -rf {i.path}")
 
 
-def models_table(models) -> Table:
+def models_table(models, avail=None) -> Table:
+    """The registry listing, with a weight-availability column.
+
+    ``avail`` maps model id -> :class:`~spark.registry.availability.Availability`.
+    Omitted (or missing an id) renders as an em dash, so callers that do not have
+    the check to hand still get a table.
+    """
     t = Table(title="Models", expand=False)
     t.add_column("id", style="cyan")
+    t.add_column("avail")
     t.add_column("backend")
     t.add_column("quant", style="dim")
     t.add_column("format", style="dim")
     t.add_column("status", style="dim")
     for m in models:
-        t.add_row(m.id, m.backend or "—", m.quant or "—", m.model_format, m.research_status)
+        t.add_row(
+            m.id,
+            _avail_cell((avail or {}).get(m.id)),
+            m.backend or "—",
+            m.quant or "—",
+            m.model_format,
+            m.research_status,
+        )
     return t
+
+
+def _avail_cell(a) -> str:
+    if a is None:
+        return "[dim]—[/dim]"
+    if a.state in ("local", "hub"):
+        colour = "green" if a.state == "local" else "cyan"
+        return f"[{colour}]{a.state}[/{colour}] [dim]{_fmt_bytes(a.bytes_present)}[/dim]"
+    if a.state == "missing":
+        colour = "yellow" if a.downloadable else "red"
+        return f"[{colour}]MISSING[/{colour}]"
+    return f"[dim]{a.state}[/dim]"
+
+
+def render_missing_weights(entries, avail) -> None:
+    """Warn about registered models whose weights are not on this host.
+
+    The inverse of :func:`render_store_issues`: that one finds disk spark cannot
+    see, this one finds entries spark would advertise and then fail to serve.
+    """
+    gone = [e for e in entries if (avail.get(e.id) is not None and not avail[e.id].ok)]
+    if not gone:
+        return
+    console.print(
+        f"[yellow]![/yellow] [bold]{len(gone)} registered model(s) have no "
+        f"weights on this host[/bold] (the entry outlived the weights):"
+    )
+    for e in gone:
+        a = avail[e.id]
+        console.print(
+            f"  • [cyan]{e.id}[/cyan] — {a.detail}"
+            + (f" · {a.location}" if a.location else "")
+        )
+        if e.hf_repo:
+            console.print(f"    fetch: [bold]spark download {e.hf_repo}[/bold]")
+        console.print(f"    drop the entry: [bold]spark forget {e.id}[/bold]")
+

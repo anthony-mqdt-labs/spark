@@ -36,6 +36,12 @@ backoff_base_s = 1.0
 backoff_max_s = 30.0
 health_interval_s = 5.0
 shutdown_grace_s = 10.0
+# Confirm a real generation before declaring a server ready. Lazy runtimes
+# (mlx_lm/mlx_vlm) listen before their model is resident and answer /v1/models
+# from an HF-cache scan, so a health probe alone cannot distinguish "serving"
+# from "merely breathing" — a dead generator thread would otherwise be reported
+# ready forever, with every request hanging.
+verify_generation = true
 
 # Research providers for `spark download`: an ordered fallback chain. Each is
 # tried until one returns a schema-valid config. A provider is skipped if its

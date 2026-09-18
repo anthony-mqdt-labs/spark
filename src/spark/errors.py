@@ -112,6 +112,18 @@ class AmbiguousModelError(ModelError):
     code = "MODEL_AMBIGUOUS"
 
 
+class WeightsMissingError(ModelError):
+    """The entry asserts weights that are not on this host.
+
+    Launch would otherwise hand the runtime a repo id, which quietly fetches
+    several gigabytes at the first request — after the health gate has already
+    passed. Fail early, with the two real options.
+    """
+
+    code = "MODEL_WEIGHTS_MISSING"
+    exit_code = 69  # EX_UNAVAILABLE
+
+
 # --- resource budgets ----------------------------------------------------------
 class ResourceError(SparkError):
     code = "RUN_RESOURCE"

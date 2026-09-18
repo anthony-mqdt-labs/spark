@@ -23,6 +23,9 @@
 name = "darkcore"
 description = "Patchwork dark-core dynamic router (verify-and-escalate cascade) as a supervised child."
 model_format = "any"
+# The router resolves and loads its own tier weights (T0/T1/T2) internally; spark
+# never sees them, so the launch preflight must not demand spark-visible weights.
+requires_local_weights = false
 requires_os = ["Darwin"]
 requires_arch = ["arm64"]
 install_hint = "set $DARKCORE_ROUTER_DIR to the router's project root, then `cd $DARKCORE_ROUTER_DIR && uv sync`   (standalone uv project)"
