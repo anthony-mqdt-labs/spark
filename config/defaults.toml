@@ -4,7 +4,13 @@
 
 [general]
 host = "127.0.0.1"          # bind loopback only; no LAN exposure by default
-port_range = [8080, 8099]
+# spark's own servers live in 8095-8099, and 8095 is the canonical endpoint that
+# consumers (agent CLIs, banter's backend-spark) pin. Ports below 8095 belong to
+# other things on this host (rsi-proto holds 8080), which is why the range does
+# not start at 8080 any more: a preferred port that is taken causes drift, and
+# drift used to be silent — see `run/instances/<model>.json` for the published
+# endpoint, and the `port_drift` telemetry event when it happens.
+port_range = [8095, 8099]
 log_retention_days = 7
 # Backend preference for this class of host (Apple Silicon). Highest first.
 preference = ["mlx_lm", "mlx_vlm", "llama_cpp", "omlx", "ollama"]

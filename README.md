@@ -97,6 +97,7 @@ spark config review <model> [--accept|--reject]   # apply/discard staged researc
 spark config import <model>    # import research JSON from stdin (manual path)
 spark doctor                   # probe host + runtime availability + budgets
 spark list                     # list models (+ weight availability)
+spark catalog [--json]         # the machine-readable roster (catalog.json)
 spark forget <model>           # remove a registry entry (weights untouched)
 spark secret set|ls|rm|get <name>                 # macOS Keychain vault
 spark config validate|path|show                   # inspect configuration
@@ -471,6 +472,33 @@ The fuzzy `spark <Tab>` menu depends on a chain of files **outside this repo**:
 - Egress happens only in: `hf download`, llama `-hf`, the public model-card fetch,
   and the agent CLIs. Everything else (probe, launch, health) is local.
 
+### 9.8 Consumer endpoint discovery — the published record
+
+Consumers do not have to guess a URL or scrape the CLI. Two artifacts under the
+data dir are the contract:
+
+- `run/instances/<model>.json` — one v1 record per live server, written when the
+  server becomes ready, heartbeat-updated while it runs (so a stale file from a
+  `SIGKILL`/power-loss is detectable), and deleted on exit. Fields:
+  `schema_version=1`, `session_id`, `pid`, `state="ready"`, `base_url`,
+  `port`, `api_contract="openai.chat-completions.v1"`, `model_id` (the exact API
+  model id a client must send in the request body), `model_alias` (spark registry
+  id), `backend`, `health_url`, `started_at`, `updated_at`. Consumer-side reader:
+  `banter/rust/crates/backend-spark/src/discovery.rs`, which requires a bounded
+  regular non-symlink file ≤64 KiB and cross-checks the recorded pid against the
+  process table. **Changing a field name breaks that reader** — it is a published
+  contract, not internal state. The directory is `0700` and the records `0600`.
+- `catalog.json` — the roster: every registered model with availability as of
+  `generated_at` (state, location, bytes, `checked_at`) plus the live instances.
+  Refreshed by `spark list`, `spark catalog`, `download`, `forget`, research
+  accept/import, and on server ready/exit. Consumers that need a model list (not
+  just the live endpoint) read this instead of parsing `spark list`.
+
+The port convention is part of the same contract: spark's own servers prefer
+8095 (`general.port_range = [8095, 8099]`; llama.cpp 8096, oMLX 8097). A taken
+preferred port still causes drift, but drift is now logged (`port_drift`) and
+published, so a consumer that reads the instance record is unaffected.
+
 ---
 
 ## 10. Decision log (the "why")
@@ -608,7 +636,15 @@ SPARK_HOME=/tmp/sparktest uv run spark …  # isolate config/data/logs for testi
 - **`hermes` / `pi` provider templates** are best-guess; only `claude` is verified.
 - **Distribution beyond this host**: editable install needs the repo present; a
   built wheel (`uv build`) would let spark run on machines without the checkout.
-- **Git**: repo initialized; no commits yet (awaiting operator go-ahead).
+- **Store-backed models have no alias-shaped API id.** `mlx_lm.server` resolves
+  the request `model` field itself, so a model served from the spark store can
+  only be addressed by its absolute path; agent CLIs that validate model ids
+  (pi, omp) silently drop such an entry from their pickers. The catalog publishes
+  the working id per instance (that is what `model_id` is for) — the gap is that a
+  *static* CLI config cannot express it.
+- **Port drift is published, not prevented.** 8095 is preferred; if it is taken,
+  spark walks the range, logs `port_drift`, and writes the real endpoint to
+  `run/instances/`. A consumer that does not read that file still breaks.
 - See `CONTINUE.md` for the current session handoff and `~/.claude/plans/
   parallel-wandering-lemur.md` for the original approved plan.
 

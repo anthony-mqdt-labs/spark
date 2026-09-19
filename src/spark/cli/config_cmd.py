@@ -54,7 +54,7 @@ def config_review(model: str, accept: bool, reject: bool):
     from ..registry import resolve_model, save_model
     from ..research import apply_output_to_entry, delete_staged, load_staged
     from ..research.types import ResearchOutput
-    from .context import build_context
+    from .context import build_context, refresh_catalog
 
     ctx = build_context()
     entry = resolve_model(model, ctx.paths)
@@ -78,6 +78,7 @@ def config_review(model: str, accept: bool, reject: bool):
         save_model(entry, ctx.paths)
         delete_staged(ctx.paths, entry.id)
         ctx.telemetry.info("research", "accepted", model=entry.id, backend=entry.backend)
+        refresh_catalog(ctx, model_id=entry.id)
         console.print(f"[green]✓[/green] applied → backend=[magenta]{entry.backend}[/magenta], "
                       f"quant={entry.quant or '—'}")
         return
@@ -94,7 +95,7 @@ def config_import(model: str):
     from ..registry import resolve_model, save_model
     from ..research import apply_output_to_entry
     from ..research.types import ResearchOutput
-    from .context import build_context
+    from .context import build_context, refresh_catalog
 
     ctx = build_context()
     entry = resolve_model(model, ctx.paths)
@@ -115,4 +116,5 @@ def config_import(model: str):
     apply_output_to_entry(entry, output)
     save_model(entry, ctx.paths)
     ctx.telemetry.info("research", "imported", model=entry.id, backend=entry.backend)
+    refresh_catalog(ctx, model_id=entry.id)
     console.print(f"[green]✓[/green] imported → backend=[magenta]{entry.backend}[/magenta]")

@@ -2,6 +2,42 @@
 
 Session handoff snapshot. Overwrite at session end / before compaction.
 
+## 2026-09-18 (2) — port 8095, the live record, and the consumer contract
+
+Operator directive: one canonical local endpoint, and spark must *keep* and
+*publish* a live record of its models.
+
+- **Port convention.** `mlx_lm` / `mlx_vlm` prefer **8095**; `port_range` is now
+  `[8095, 8099]` (below 8095 is other software's territory — rsi-proto holds
+  8080). llama.cpp 8096, oMLX 8097. Drift is no longer silent: a taken preferred
+  port logs `port_drift` and is published in the instance record. Live-verified:
+  a run bound 8095 with no drift event.
+- **The live record** (`src/spark/catalog.py`):
+  · `run/instances/<model>.json` — v1 manifest written on ready, heartbeat every
+    30 s, deleted on exit (also from the `run()` finally, so crashes and
+    pre-launch errors cannot leak a record). This is the contract
+    `banter/rust/crates/backend-spark/src/discovery.rs` was written against; it
+    validates schema_version 1, `api_contract = "openai.chat-completions.v1"`,
+    the exact `model_id`, and a bounded non-symlink file. Dir 0700, records 0600.
+  · `catalog.json` — the roster (every model + observed availability +
+    live instances), refreshed by `list`, `catalog`, `download`, `forget`,
+    research accept/import, and on ready/exit. New `spark catalog [--json]`.
+- **Consumers repointed to 8095**: all nine Hermes configs (`mlx-local`, with the
+  `model:` pin and frozen `models:` lists removed so `/v1/models` discovery
+  works), pi and omp (`<profile>/models.json` — omp reads the same schema, proven
+  by experiment), opencode (`provider.spark`), and banter (`python/.env`,
+  `.env.example`, `.docker-inference.env`, `python/Makefile`, and the Rust
+  `DEFAULT_BASE_URL` + its test). Backups of every touched config sit beside it
+  as `*.bak.20260918-spark8095`.
+
+Flags raised rather than silently papered over:
+- banter's cross-stack default model is `mlx-community/MiniCPM5-1B-8bit` whose
+  weights are gone (the reclaimed hub-cache copy); banter's default therefore
+  cannot resolve until that 1.1 GB is re-fetched, or the default is changed.
+- pi/omp **drop** a model whose id is an absolute path, so store-backed models
+  cannot appear in their static pickers; only hub-cache-backed ids can. The
+  catalog publishes the working id per instance, which is the durable answer.
+
 ## 2026-09-18 — phantom models + zombie servers: availability, disk gate, warmup
 
 Diagnosed from a live incident, then fixed all three:

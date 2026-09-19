@@ -41,6 +41,7 @@ class SparkGroup(click.Group):
 @click.command(name="list")
 def list_command():
     """List registered models."""
+    from ..catalog import write_catalog
     from ..registry import list_models
     from ..registry.availability import availability_map
     from ..registry.store import scan_store
@@ -55,6 +56,50 @@ def list_command():
         console.print("[dim]no models registered — try `spark download <hf-repo>`[/dim]")
     render_missing_weights(models, avail)
     render_store_issues(scan_store(ctx.paths))
+    # Keep the published roster in step with what the operator just looked at.
+    write_catalog(ctx.paths, ctx.config, entries=models)
+
+
+@click.command(name="catalog")
+@click.option("--json", "as_json", is_flag=True, help="Print the catalog JSON instead of a summary.")
+@click.option("--refresh/--no-refresh", default=True, help="Regenerate before printing.")
+def catalog_command(as_json: bool, refresh: bool):
+    """Print the live model catalog (the machine-readable roster).
+
+    Same data consumers read from `<data>/catalog.json`: every registered model
+    with its availability as of now, plus any live instances.
+    """
+    import json as _json
+
+    from ..catalog import build_catalog, write_catalog
+
+    ctx = build_context()
+    if refresh:
+        path = write_catalog(ctx.paths, ctx.config)
+    else:
+        from ..catalog import catalog_path
+
+        path = catalog_path(ctx.paths)
+    if as_json:
+        console.print_json(_json.dumps(build_catalog(ctx.paths, ctx.config)))
+        return
+    cat = build_catalog(ctx.paths, ctx.config)
+    console.print(f"[bold]catalog[/bold] [dim]{path}[/dim]")
+    console.print(f"  generated: {cat['generated_at']}   schema: {cat['schema_version']}")
+    console.print(f"  api contract: {cat['api_contract']}")
+    live = cat["instances"]
+    if live:
+        console.print(f"  [green]{len(live)} live instance(s)[/green]")
+        for inst in live:
+            console.print(
+                f"    • [cyan]{inst['model_alias']}[/cyan] → {inst['base_url']} "
+                f"[dim]({inst['backend']}, pid {inst['pid']})[/dim]"
+            )
+            console.print(f"      api id: {inst['model_id']}")
+    else:
+        console.print("  [dim]no live instances[/dim]")
+    missing = [m for m in cat["models"] if not m["availability"]["ok"]]
+    console.print(f"  models: {len(cat['models'])} registered, {len(missing)} without weights")
 
 
 @click.command(name="forget")
@@ -66,6 +111,7 @@ def forget_command(model: str):
     keeps being listed, and would keep being a broken `spark run` target, until
     someone drops it. This drops it — and nothing else.
     """
+    from ..catalog import write_catalog
     from ..registry import delete_model, resolve_model
     from ..registry.availability import resolve_availability
 
@@ -80,6 +126,7 @@ def forget_command(model: str):
         "registry", "forgotten",
         model_id=entry.id, state=avail.state, location=avail.location,
     )
+    write_catalog(ctx.paths, ctx.config)
     console.print(f"[green]✓[/green] forgot [cyan]{entry.id}[/cyan] (registry entry removed)")
     if avail.state == "local" and avail.location:
         console.print(
@@ -106,6 +153,7 @@ cli.add_command(download_command)
 cli.add_command(research_command)
 cli.add_command(doctor_command)
 cli.add_command(list_command)
+cli.add_command(catalog_command)
 cli.add_command(forget_command)
 cli.add_command(secret_group)
 cli.add_command(config_group)

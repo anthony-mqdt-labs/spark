@@ -27,6 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..budget import check_disk, check_memory
+from ..catalog import InstancePublisher, write_catalog
 from ..config.paths import SparkPaths
 from ..config.schema import ModelEntry, SparkConfig
 from ..errors import (
@@ -64,6 +65,8 @@ class ReadyInfo:
     port: int
     elapsed_s: float
     log_path: str
+    note: str = ""  # e.g. the preferred port was taken, so this is a fallback
+    api_model_id: str = ""  # exactly what a client must send as request `model`
 
 
 def _port_free(host: str, port: int) -> bool:
@@ -127,6 +130,7 @@ class Supervisor:
         self._stop = threading.Event()
         self._proc: subprocess.Popen | None = None
         self._peak_rss = 0
+        self._publisher: InstancePublisher | None = None
         # Child stdout/stderr are redirected here (not the terminal) to keep the
         # CLI output clean; tailed on failure so the reason still surfaces.
         self._log_path = paths.log_dir / "servers" / f"{entry.id}.log"
@@ -214,8 +218,13 @@ class Supervisor:
         # (a 27B fetch into ~4 GiB free filled the volume and killed the server
         # mid-download). With weights local nothing new is written, so the same
         # reading is advisory — being low on disk should not block a run.
+        # Measured on the volume the bytes would land on: the store when a fetch
+        # is possible, the data dir otherwise.
         need_bytes = (self.entry.size_bytes or 0) if avail.state == MISSING else 0
-        disk = check_disk(self.paths.data_dir, need_bytes, self.config.disk)
+        disk_target = (
+            self.paths.model_store_dir if avail.state == MISSING else self.paths.data_dir
+        )
+        disk = check_disk(disk_target, need_bytes, self.config.disk)
         self.log.info(
             "supervisor", "disk_check", ok=disk.ok, detail=disk.detail,
             will_fetch=avail.state == MISSING, need_bytes=need_bytes,
@@ -243,6 +252,14 @@ class Supervisor:
             return self.backend.default_port
         lo, hi = self.config.general.port_range
         port = _pick_port(host, self.backend.default_port, lo, hi)
+        if port != self.backend.default_port:
+            # Consumers pin ports, so drift breaks them silently — say it out
+            # loud, and publish the endpoint (run/instances/<model>.json) so a
+            # consumer that reads it does not have to care.
+            self.log.warn(
+                "supervisor", "port_drift",
+                preferred=self.backend.default_port, chosen=port, model=self.entry.id,
+            )
         return port
 
     def _free_space_steps(self) -> list[str]:
@@ -359,6 +376,12 @@ class Supervisor:
             rss = _rss_bytes(self._proc.pid)
             if rss:
                 self._peak_rss = max(self._peak_rss, rss)
+            # Keep the published instance record fresh: a consumer uses
+            # updated_at to tell a live endpoint from a stale file left by a
+            # hard kill (SIGKILL, power loss), which is the one case where
+            # removal on exit never happens.
+            if self._publisher is not None:
+                self._publisher.maybe_heartbeat()
             time.sleep(interval)
         return "stop_requested"
 
@@ -427,6 +450,16 @@ class Supervisor:
         try:
             return self._run(on_ready)
         finally:
+            # Whatever happened — clean stop, crash, exhausted recovery, or an
+            # error before launch — a published instance must not outlive the
+            # server it describes, and the catalog must reflect the exit.
+            if self._publisher is not None:
+                self._publisher.remove()
+                self._publisher = None
+            try:
+                write_catalog(self.paths, self.config)
+            except Exception as exc:  # noqa: BLE001 - publishing is a courtesy
+                self.log.warn("supervisor", "catalog_write_failed", error=repr(exc))
             if self._log_fh:
                 self._log_fh.close()
                 self._log_fh = None
@@ -434,11 +467,48 @@ class Supervisor:
     def _announce_ready(
         self, on_ready, base: str, port: int, since: float
     ) -> None:
+        preferred = self.backend.default_port
+        note = ""
+        if port != preferred:
+            note = f"{preferred} was busy; consumers pinning it must follow this endpoint"
         if on_ready is not None:
             on_ready(ReadyInfo(
                 base_url=base, backend=self.backend.name, port=port,
                 elapsed_s=time.monotonic() - since, log_path=str(self._log_path),
+                note=note,
+                api_model_id=self.backend.resolve_model_ref(self.entry),
             ))
+
+    def _publish_instance(self, base: str, port: int, health_url: str) -> None:
+        """Publish the live-instance manifest consumers read to find this endpoint.
+
+        Publishing is a courtesy, never a gate: a failure to write it must not
+        take down a server that is otherwise serving.
+        """
+        self._publisher = InstancePublisher(
+            self.paths,
+            alias=self.entry.id,
+            api_model_id=self.backend.resolve_model_ref(self.entry),
+            backend=self.backend.name,
+            base_url=base,
+            port=port,
+            health_url=health_url,
+            session_id=str(getattr(self.log, "session_id", "unbound")),
+        )
+        try:
+            path = self._publisher.publish()
+        except OSError as exc:
+            self.log.warn(
+                "supervisor", "instance_publish_failed",
+                model=self.entry.id, error=repr(exc),
+            )
+            self._publisher = None
+            return
+        self.log.info(
+            "supervisor", "instance_published",
+            model=self.entry.id, port=port, path=str(path),
+            api_model_id=self.backend.resolve_model_ref(self.entry),
+        )
 
     def _run(self, on_ready: Callable[[ReadyInfo], None] | None) -> LaunchResult:
         t0 = time.monotonic()
@@ -502,6 +572,7 @@ class Supervisor:
             )
             if not announced:
                 self._announce_ready(on_ready, base, port, t0)
+                self._publish_instance(base, port, url)
                 announced = True
             reason = self._monitor(url)
 

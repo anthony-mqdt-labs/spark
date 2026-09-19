@@ -23,7 +23,7 @@ args_template = [
     "--memory-guard", "safe",
 ]
 openai_compatible = true
-default_port = 8083
+default_port = 8097
 health_path = "/v1/models"
 ready_timeout_s = 240.0
 

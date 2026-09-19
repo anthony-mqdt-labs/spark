@@ -99,7 +99,13 @@ def _print_ready(model_id: str, label: str, info) -> None:
     console.print()
     console.print(f"  [green]➜[/green]  [bold]Local:[/bold]   [cyan]{info.base_url}[/cyan]")
     console.print(f"  [green]➜[/green]  [bold]Model:[/bold]   {model_id} [dim]({label})[/dim]")
+    if info.api_model_id and info.api_model_id != model_id:
+        # Store-backed models are addressed by absolute path, hub-backed ones by
+        # repo id — the request body must carry this, not the spark alias.
+        console.print(f"  [green]➜[/green]  [bold]API id:[/bold]  [dim]{info.api_model_id}[/dim]")
     console.print(f"  [green]➜[/green]  [bold]Logs:[/bold]    [dim]{info.log_path}[/dim]")
+    if info.note:
+        console.print(f"  [yellow]![/yellow]  [dim]{info.note}[/dim]")
     console.print()
     console.print("  [dim]press Ctrl+C to stop[/dim]")
     console.print()

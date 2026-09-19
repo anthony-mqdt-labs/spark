@@ -29,7 +29,7 @@ from ..config.schema import ModelEntry
 from ..errors import InsufficientDiskError, SparkError
 from ..registry import save_model
 from ..registry.store import dir_bytes as _dir_bytes
-from .context import SparkCtx, build_context
+from .context import SparkCtx, build_context, refresh_catalog
 from .render import console
 
 _QUANT_RE = re.compile(r"\b(q[2-8])(?:_[a-z0-9]+)?\b", re.I)
@@ -299,6 +299,7 @@ def download_command(
     )
     save_model(entry, ctx.paths)
     ctx.telemetry.info("download", "registered", model_id=mid, fetched=not no_fetch)
+    refresh_catalog(ctx, model_id=mid)
     console.print(f"[green]✓[/green] registered [cyan]{mid}[/cyan] "
                   f"(format={entry.model_format or 'any'}, quant={entry.quant or '?'})")
 

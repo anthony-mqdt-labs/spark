@@ -47,6 +47,21 @@ def build_context() -> SparkCtx:
     )
 
 
+def refresh_catalog(ctx: "SparkCtx", *, model_id: str = "") -> None:
+    """Keep the published roster in step with a registry change.
+
+    Publishing is a courtesy: a consumer reading `<data>/catalog.json` should not
+    have to run `spark list` to notice a model appeared or was forgotten, but a
+    failure to write it must never fail the command that changed the registry.
+    """
+    try:
+        from ..catalog import write_catalog
+
+        write_catalog(ctx.paths, ctx.config)
+    except Exception as exc:  # noqa: BLE001 - publishing is a courtesy
+        ctx.telemetry.warn("catalog", "write_failed", model_id=model_id, error=repr(exc))
+
+
 def _version() -> str:
     try:
         from importlib.metadata import version

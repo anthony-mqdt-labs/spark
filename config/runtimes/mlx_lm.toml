@@ -18,7 +18,7 @@ binary = "mlx_lm.server"
 # {model_path}, {host}, {port} are filled at launch. --host pinned to loopback.
 args_template = ["--model", "{model_path}", "--host", "{host}", "--port", "{port}"]
 openai_compatible = true
-default_port = 8080
+default_port = 8095
 health_path = "/v1/models"
 ready_timeout_s = 180.0
 

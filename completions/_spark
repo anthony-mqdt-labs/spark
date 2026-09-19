@@ -12,6 +12,7 @@ _spark() {
       'research:Research optimal config for a registered model'
       'doctor:Probe host capabilities and runtimes'
       'list:List registered models'
+      'catalog:Print the live model catalog'
       'forget:Remove a model from the registry'
       'secret:Manage secrets (macOS Keychain)'
       'config:Inspect and validate configuration'
