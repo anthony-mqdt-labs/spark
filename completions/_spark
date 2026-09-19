@@ -19,11 +19,18 @@ _spark() {
       'completion:Emit shell completion'
   )
 
+  # Availability decides the menu (computed live at Tab time): a launch context
+  # must not offer a model whose weights are gone, while `forget` must still
+  # name it so it can be removed. At position 2 the word being completed is the
+  # subcommand itself, so the context stays empty (launch) there.
+  local ctx=""
+  (( CURRENT > 2 )) && ctx="${words[2]}"
+
   local -a models
   local id desc
   while IFS=$'\t' read -r id desc; do
     [[ -n "$id" ]] && models+=("${id}:${desc}")
-  done < <(command spark __complete models 2>/dev/null)
+  done < <(command spark __complete models "$ctx" 2>/dev/null)
 
   if (( CURRENT == 2 )); then
     _describe -t commands 'spark command' subcmds

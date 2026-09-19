@@ -1,9 +1,10 @@
 """Availability reconciliation: registry entries vs. weights actually on disk.
 
 These tests pin the behaviour the 2026-09-18 incident demanded: an entry that
-asserts weights nobody can find must be *reportable* (`spark list`), *visible* to
-consumers (`__complete`), and *refused* at launch rather than turned into an
-invisible multi-GB fetch behind a passing health check.
+asserts weights nobody can find must be *reportable* (`spark list`), *nameable*
+(`__complete`, in the administrative contexts where naming it is the point), and
+*refused* at launch rather than turned into an invisible multi-GB fetch behind a
+passing health check.
 """
 
 from __future__ import annotations

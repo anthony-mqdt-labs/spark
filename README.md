@@ -102,7 +102,7 @@ spark forget <model>           # remove a registry entry (weights untouched)
 spark secret set|ls|rm|get <name>                 # macOS Keychain vault
 spark config validate|path|show                   # inspect configuration
 spark completion zsh           # emit the zsh completion function
-spark __complete <models|describe>                # hidden: machine-readable completion data
+spark __complete models [context] | describe <model>   # hidden: completion data
 ```
 
 **The `spark <model>` fallthrough.** `spark` is a `click.Group` subclass
@@ -137,7 +137,7 @@ spark/
 │   ├── research/                # types/guard/prompt/providers/chain/staging
 │   ├── telemetry/               # jsonl.py (structured logging + redaction)
 │   └── errors.py                # typed errors carrying remediation
-├── tests/                       # pytest (76 tests)
+├── tests/                       # pytest (173 tests)
 ├── spikes/                      # time-boxed evaluation spikes + the portable
 │                                #   human/emotion eval skill (spikes/README.md)
 ├── bake-offs/                   # comparative model bake-offs — quality evals,
@@ -222,9 +222,14 @@ answered `/v1/models` and `/health` with 200 while producing no tokens.
 same rule the omlx backend uses), `missing` (the entry asserts weights that are
 not here), `external` (runtime-owns-its-weights: router child, ollama daemon,
 relay — declared per runtime via `requires_local_weights`), `unverifiable`
-(nothing asserted). `spark list`, `spark __complete`, and the launch preflight
-all read it, so they cannot disagree; `spark forget <model>` is the way to drop
-an entry whose weights are gone.
+(nothing asserted). `spark list` reports it, the launch preflight refuses to
+start on it, and completion filters on it — so they cannot disagree.
+
+Completion is context-aware, because *visible* is not *offered*: a launch
+context (`run`, or a bare `spark <TAB>`) never offers an entry whose weights are
+missing, while `forget`/`research`/`download` still name it — marked
+`MISSING WEIGHTS` — since naming it is how it gets cleaned up. `spark forget
+<model>` is the way to drop an entry whose weights are gone.
 
 
 ---
@@ -406,14 +411,19 @@ The fuzzy `spark <Tab>` menu depends on a chain of files **outside this repo**:
 - `~/.config/zsh/completions/_spark` — the completion function. It is **generated**
   by `spark completion zsh` (source of truth: `cli/completion.py:_ZSH_COMPLETION`).
   The repo's `completions/_spark` is a reference copy. **If you change subcommands,
-  regenerate both** and re-`compdef`.
+  or the completion contract, regenerate both** and re-`compdef`. An already-open
+  shell keeps the function it autoloaded: start a new shell (or `unfunction
+  _spark; autoload -Uz _spark`) to pick up a regenerated one.
 - `~/.config/zsh/plugins/fzf-tab/` — the fzf-tab plugin (git clone). Provides the
   fuzzy popup; requires `fzf` (Homebrew). Without it, completion degrades to the
   native menu (still works).
-- The completion function calls `command spark __complete models` to get
-  `id<TAB>desc` lines, and the preview pane calls `spark __complete describe
-  $word`. **`__complete` must stay fast, stdout-only, and never error** (it's
-  wrapped in try/except and bypasses `build_context`). Breaking it breaks Tab.
+- The completion function calls `command spark __complete models "$ctx"` to get
+  `id<TAB>desc` lines, where `$ctx` is the subcommand being completed (empty at
+  position 2, i.e. a bare `spark <TAB>`). The context is what keeps entries with
+  missing weights out of launch menus while still naming them for `forget`. The
+  preview pane calls `spark __complete describe $word`. **`__complete` must stay
+  fast, stdout-only, and never error** (it's wrapped in try/except and bypasses
+  `build_context`). Breaking it breaks Tab.
 
 ### 9.4 Hugging Face
 - **Downloads** shell out to the `hf` CLI (`hf download <repo> --local-dir …`),
