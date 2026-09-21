@@ -39,25 +39,29 @@ class SparkGroup(click.Group):
 
 
 @click.command(name="list")
-def list_command():
-    """List registered models."""
+@click.option("--all", "show_all", is_flag=True,
+              help="Show missing entries and non-servable cache in full.")
+def list_command(show_all: bool):
+    """List what this host can actually serve (disk truth, registry or not)."""
     from ..catalog import write_catalog
-    from ..registry import list_models
-    from ..registry.availability import availability_map
+    from ..inventory import build_inventory
     from ..registry.store import scan_store
-    from .render import models_table, render_missing_weights, render_store_issues
+    from .render import (
+        render_inventory_notes,
+        render_store_issues,
+        runnable_table,
+    )
 
     ctx = build_context()
-    models = list_models(ctx.paths)
-    avail = availability_map(models, ctx.paths, config=ctx.config)
-    if models:
-        console.print(models_table(models, avail))
+    inv = build_inventory(ctx.paths, ctx.config)
+    if inv.runnable_registered or inv.runnable_discovered or inv.external or inv.unverifiable:
+        console.print(runnable_table(inv))
     else:
-        console.print("[dim]no models registered — try `spark download <hf-repo>`[/dim]")
-    render_missing_weights(models, avail)
+        console.print("[dim]nothing runnable on disk — try `spark download <hf-repo>`[/dim]")
+    render_inventory_notes(inv, verbose=show_all)
     render_store_issues(scan_store(ctx.paths))
     # Keep the published roster in step with what the operator just looked at.
-    write_catalog(ctx.paths, ctx.config, entries=models)
+    write_catalog(ctx.paths, ctx.config)
 
 
 @click.command(name="catalog")
@@ -100,6 +104,64 @@ def catalog_command(as_json: bool, refresh: bool):
         console.print("  [dim]no live instances[/dim]")
     missing = [m for m in cat["models"] if not m["availability"]["ok"]]
     console.print(f"  models: {len(cat['models'])} registered, {len(missing)} without weights")
+    if cat.get("discovered"):
+        console.print(f"  discovered: {len(cat['discovered'])} on-disk model(s) not in the registry")
+        for d in cat["discovered"]:
+            console.print(f"    • [cyan]{d['id']}[/cyan] [dim]({d['source']})[/dim]")
+
+
+@click.command(name="adopt")
+@click.argument("repo")
+@click.option("--id", "model_id", default=None, help="Registry id (default: repo tail slug).")
+@click.option("--backend", "backend", default="", help="Pin a runtime backend.")
+def adopt_command(repo: str, model_id: str | None, backend: str):
+    """Register an on-disk model (hub cache or store path) into the registry.
+
+    REPO is an HF repo id (e.g. a row from `spark list`) or a local store path.
+    The weights stay where they are; this only writes the registry entry so the
+    model keeps a backend, research provenance, and a short id.
+    """
+    import re
+
+    from ..catalog import write_catalog
+    from ..config.schema import ModelEntry
+    from ..inventory import build_inventory
+    from ..registry import save_model
+
+    ctx = build_context()
+    inv = build_inventory(ctx.paths, ctx.config, with_bytes=False)
+    target = repo.strip()
+    found = None
+    for m in inv.runnable_discovered:
+        if m.display_id.lower() == target.lower() or m.location == target:
+            found = m
+            break
+    if found is None:
+        from ..errors import ModelNotFoundError
+
+        raise ModelNotFoundError(
+            f"Nothing adoptable matches '{repo}'.",
+            remediation=[
+                "Adoptable models are the unregistered rows of: spark list",
+                f"Or download it first: spark download {repo}",
+            ],
+            context={"query": repo},
+        )
+    slug = model_id or re.sub(r"[^A-Za-z0-9_.-]+", "-", found.display_id.split("/")[-1]).strip("-").lower()
+    entry = ModelEntry(
+        id=slug,
+        hf_repo=found.repo,
+        path=found.location if found.source == "store" else "",
+        backend=backend,
+        model_format=found.model_format,  # type: ignore[arg-type]
+        quant=found.quant,
+        research_status="pending",
+    )
+    save_model(entry, ctx.paths)
+    ctx.telemetry.info("registry", "adopted", model_id=slug, source=found.source)
+    write_catalog(ctx.paths, ctx.config)
+    console.print(f"[green]✓[/green] adopted [cyan]{found.display_id}[/cyan] as [cyan]{slug}[/cyan]")
+    console.print(f"  [dim]research next: spark research {slug}[/dim]")
 
 
 @click.command(name="forget")
@@ -113,11 +175,14 @@ def forget_command(model: str):
     """
     from ..catalog import write_catalog
     from ..registry import delete_model, resolve_model
-    from ..registry.availability import resolve_availability
+    from ..registry.availability import requires_weights_for, resolve_availability
 
     ctx = build_context()
     entry = resolve_model(model, ctx.paths)  # exact -> alias -> unique prefix
-    avail = resolve_availability(entry, ctx.paths, requires_weights=False)
+    avail = resolve_availability(
+        entry, ctx.paths,
+        requires_weights=requires_weights_for(entry, ctx.config),
+    )
     removed = delete_model(entry.id, ctx.paths)
     if not removed:
         console.print(f"[yellow]no registry entry for {entry.id}[/yellow]")
@@ -155,6 +220,7 @@ cli.add_command(doctor_command)
 cli.add_command(list_command)
 cli.add_command(catalog_command)
 cli.add_command(forget_command)
+cli.add_command(adopt_command)
 cli.add_command(secret_group)
 cli.add_command(config_group)
 cli.add_command(completion_command)

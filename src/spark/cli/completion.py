@@ -37,9 +37,10 @@ _spark() {
   subcmds=(
       'run:Launch the optimal runtime for a model'
       'download:Download + register a Hugging Face model'
+      'adopt:Register an on-disk model into the registry'
       'research:Research optimal config for a registered model'
       'doctor:Probe host capabilities and runtimes'
-      'list:List registered models'
+      'list:List what this host can serve'
       'catalog:Print the live model catalog'
       'forget:Remove a model from the registry'
       'secret:Manage secrets (macOS Keychain)'
@@ -67,7 +68,7 @@ _spark() {
   fi
 
   case "${words[2]}" in
-    run|download|research|forget)
+    run|download|research|forget|adopt)
       _describe -t models 'model' models ;;
     secret)
       _values 'secret command' set ls rm get ;;
@@ -92,17 +93,50 @@ def completion_command(shell: str):
 def completion_models(paths, context: str = "") -> list[tuple[str, str]]:
     """(model id, description) candidates for one completion context.
 
-    Availability is computed without walking weights (`with_bytes=False`) and
-    without loading config: this path must stay fast and offline (README §9.3).
-    MISSING means the entry asserts weights that are absent — the one signal a
-    consumer must not offer as runnable, since the launch path refuses it. In
-    administrative contexts the entry stays nameable, marked, because naming it
-    is how it gets cleaned up.
+    The menu is disk truth: every runnable model — registered or merely present
+    — is offered in launch contexts. Availability is computed without walking
+    weights (`with_bytes=False`) and without loading config: this path must stay
+    fast and offline (README §9.3). Missing registry entries stay nameable in
+    administrative contexts (marked), because naming them is how they get
+    cleaned up; unregistered disk models are offered only where they can run.
     """
-    from ..registry.availability import MISSING, resolve_availability
+    from ..inventory import build_inventory
 
     offer_missing = context.strip().lower() not in LAUNCH_CONTEXTS
+    is_launch = context.strip().lower() in LAUNCH_CONTEXTS
     candidates: list[tuple[str, str]] = []
+    try:
+        inv = build_inventory(paths, config=None, with_bytes=False)
+    except Exception:
+        inv = None
+    if inv is not None:
+        if is_launch:
+            for entry, _a in (*inv.runnable_registered, *inv.external, *inv.unverifiable):
+                desc = " · ".join(x for x in (entry.backend, entry.quant, entry.model_format) if x) or "model"
+                candidates.append((entry.id, desc))
+            for m in inv.runnable_discovered:
+                candidates.append((m.display_id, f"{m.source} · on disk · not registered"))
+            return candidates
+        # Administrative contexts: registry entries (missing marked). `forget`
+        # can only drop a registry entry, so it names registry entries alone;
+        # research/download also name discovered disk models (adoptable, or
+        # directly runnable).
+        from ..registry.availability import MISSING, resolve_availability
+
+        if context.strip().lower() != "forget":
+            for m in inv.runnable_discovered:
+                candidates.append((m.display_id, f"{m.source} · on disk · not registered"))
+
+        for mod in list_models(paths):
+            desc = " · ".join(x for x in (mod.backend, mod.quant, mod.model_format) if x) or "model"
+            a = resolve_availability(mod, paths, with_bytes=False)
+            if a.state == MISSING:
+                desc = f"{desc} · {MISSING_MARK}"
+            candidates.append((mod.id, desc))
+        return candidates
+
+    from ..registry.availability import MISSING, resolve_availability
+
     for m in list_models(paths):
         desc = " · ".join(x for x in (m.backend, m.quant, m.model_format) if x) or "model"
         a = resolve_availability(m, paths, with_bytes=False)
@@ -131,7 +165,30 @@ def complete_command(what: str, arg: str | None):
         elif what == "describe" and arg:
             from ..registry.availability import resolve_availability
 
-            m = resolve_model(arg, paths)
+            try:
+                m = resolve_model(arg, paths)
+            except Exception:
+                m = None
+            if m is None:
+                # Unregistered-but-present weights still deserve a preview.
+                from ..inventory import build_inventory
+
+                inv = build_inventory(paths, config=None, with_bytes=True)
+                hit = next(
+                    (d for d in inv.runnable_discovered if d.display_id.lower() == arg.lower()),
+                    None,
+                )
+                if hit is None:
+                    return
+                size = f"{hit.bytes_present / 2**30:.1f} GiB" if hit.bytes_present else "—"
+                sys.stdout.write(
+                    f"id:       {hit.display_id}\n"
+                    f"source:   {hit.source} (on disk, not registered)\n"
+                    f"format:   {hit.model_format}\n"
+                    f"weights:  {hit.kind} · {hit.location} · {size}\n"
+                    f"adopt:    spark adopt {hit.display_id}\n"
+                )
+                return
             a = resolve_availability(m, paths)
             lines = [
                 f"id:       {m.id}",

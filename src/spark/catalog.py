@@ -211,18 +211,43 @@ def build_catalog(
     *,
     entries: list[ModelEntry] | None = None,
 ) -> dict[str, Any]:
-    """The roster: every registered model + its observed availability + live servers."""
+    """The roster: every registered model + its observed availability + live servers.
+
+    Plus ``discovered``: servable weights on disk with no registry entry, and a
+    count of cached-but-not-servable repos. Additive to the v1 contract —
+    consumers ignore unknown keys.
+    """
     if entries is None:
         from .registry import list_models
 
         entries = list_models(paths)
     avail = availability_map(entries, paths, config=config)
+    try:
+        from .inventory import build_inventory
+
+        inv = build_inventory(paths, config=config, with_bytes=False)
+        discovered = [
+            {
+                "id": m.display_id,
+                "source": m.source,
+                "location": m.location,
+                "model_format": m.model_format,
+                "quant": m.quant,
+            }
+            for m in inv.runnable_discovered
+        ]
+        non_servable_count = len(inv.non_servable)
+    except Exception:
+        discovered = []
+        non_servable_count = 0
     return {
         "schema_version": SCHEMA_VERSION,
         "api_contract": API_CONTRACT,
         "generated_at": _now_iso(),
         "data_dir": str(paths.data_dir),
         "models": [model_record(e, avail.get(e.id)) for e in entries],
+        "discovered": discovered,
+        "non_servable_cached": non_servable_count,
         "instances": read_instances(paths),
     }
 

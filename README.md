@@ -89,14 +89,15 @@ preference order would warrant adjustment.
 ## 3. User-facing model
 
 ```
-spark                          # list registered models (the completion landing view)
+spark                          # what this host can serve (disk truth, registry or not)
 spark <model>                  # launch the best-optimized runtime server for <model>
 spark download <hf-repo>       # fetch + research + register (stages config for review)
+spark adopt <repo|path>        # register on-disk weights (hub cache or store) as-is
 spark research <model>         # (re-)run the research chain for a registered model
 spark config review <model> [--accept|--reject]   # apply/discard staged research
 spark config import <model>    # import research JSON from stdin (manual path)
 spark doctor                   # probe host + runtime availability + budgets
-spark list                     # list models (+ weight availability)
+spark list [--all]             # runnable models (default) / everything (--all)
 spark catalog [--json]         # the machine-readable roster (catalog.json)
 spark forget <model>           # remove a registry entry (weights untouched)
 spark secret set|ls|rm|get <name>                 # macOS Keychain vault
@@ -110,6 +111,62 @@ spark __complete models [context] | describe <model>   # hidden: completion data
 resolution; if the first token isn't a known subcommand and isn't a flag, it
 dispatches to `run` treating the token as a model id. So real subcommands win over
 same-named models, and any other token is a model to launch.
+
+### Onboarding: first five minutes
+
+```bash
+spark doctor          # 1. runtimes present? budgets sane? (fix: brew / uv tool per hints)
+spark list            # 2. what this host can serve right now
+spark <model>         # 3. launch one (Ctrl+C stops; Tab-completes — see below)
+```
+
+Two more one-time steps, only if you need them:
+
+- **Fuzzy Tab completion** (recommended): `spark completion zsh >
+  ~/.config/zsh/completions/_spark`, source it per §9.3, start a new shell.
+  Then `spark <TAB>` is a fuzzy menu with a live preview pane.
+- **Gated/private repos**: `spark secret set hf_token` (reads via prompt, stored
+  in the macOS Keychain, never in a file). Without it, gated downloads fail and
+  the public model-card fetch still works — research just sees less.
+
+If `spark list` shows nothing runnable, your next step is one of the two
+workflows below: `download` (weights not here) or `adopt` (weights already here).
+
+### Common workflows
+
+**Run what's here.** `spark <model>` (or `spark run <model>`) picks the backend
+— the entry's pinned one, else the highest-preference available runtime that is
+format-compatible — and supervises it (preflight gates, health + warmup
+verification, bounded restart, graceful Ctrl+C). Flags: `--backend` to force one,
+`--force` to bypass memory/disk gates, `--reprobe` to re-detect the host first.
+
+**Register weights already on disk** (hub cache or store — the `not registered`
+rows of `spark list`). Three steps, in order — each depends on the previous:
+
+```bash
+spark adopt prism-ml/Ternary-Bonsai-8B-mlx-2bit   # 1. write the registry entry (weights untouched)
+spark research ternary-bonsai-8b-mlx-2bit         # 2. agent chain discovers optimal flags → stages them
+spark config review ternary-bonsai-8b-mlx-2bit --accept   # 3. apply the staged flags (or --reject to discard)
+```
+
+The model is runnable after step 1 (inferred defaults); steps 2–3 pin tuned
+config. `--id`/`--backend` on `adopt` override the slug and pin a backend.
+Note: `research` needs an `hf_repo` on the entry — hub-cache adopts have one;
+a store-only adopt without a repo runs fine but skips tuning.
+
+**Fetch a new model.** `spark download <hf-repo>` downloads (resumable, disk
+preflight), registers, and researches unless told otherwise: `--no-research`
+(skip LLM calls), `--no-fetch` (pointer only — `run` will refuse until weights
+exist), `--force` (bypass the disk gate), `--id` (override the slug).
+
+**Clean up.** `spark list --all` shows the defects: entries whose weights are
+gone (re-fetch with the printed `spark download …`, or drop with `spark forget
+<model>` — registry entry only, weights untouched) and cached repos spark
+cannot serve (embeddings/speech, with reasons).
+
+**Secrets & config.** `spark secret set|ls|rm|get <name>` (Keychain; `get`
+needs `--reveal`). `spark config validate|path|show` to inspect; research
+staging lives outside it (`review`/`import`).
 
 ---
 
@@ -133,6 +190,7 @@ spark/
 │   ├── runtimes/                # base.py (Backend ABC + registry) + per-runtime adapters
 │   ├── probe/                   # host.py (capability detection + cached profile)
 │   ├── registry/                # models.py (one TOML/model, fuzzy resolve)
+│   ├── telemetry/               # jsonl.py (structured logging + redaction)
 │   ├── runner/                  # supervisor.py (spawn/health/restart/attach/signals)
 │   ├── research/                # types/guard/prompt/providers/chain/staging
 │   ├── telemetry/               # jsonl.py (structured logging + redaction)
@@ -215,21 +273,29 @@ crashed stays "ready" forever: the process never exits, so the crash-restart
 path never fires and every request hangs. Verified live: a dead generator thread
 answered `/v1/models` and `/health` with 200 while producing no tokens.
 
-### Weights: one availability contract, three consumers
+### Weights: disk truth first, registry as overlay
 
-`registry/availability.py` reconciles each entry against the filesystem —
-`local` (spark store), `hub` (HF hub cache, resolved through `hf_cache.py`, the
-same rule the omlx backend uses), `missing` (the entry asserts weights that are
-not here), `external` (runtime-owns-its-weights: router child, ollama daemon,
-relay — declared per runtime via `requires_local_weights`), `unverifiable`
-(nothing asserted). `spark list` reports it, the launch preflight refuses to
-start on it, and completion filters on it — so they cannot disagree.
+`registry/models/*.toml` is a list of *intentions*; the filesystem owns reality.
+`inventory.py` scans both weight locations — the spark store and the HF hub
+cache — classifies each snapshot as servable (`llm`: generative weights a
+runtime can serve) or cached-but-not-servable (embedders, speech-to-text/TTS,
+partial downloads), and joins that against the registry. `spark list`, `spark
+run`, and completion all read that join:
 
-Completion is context-aware, because *visible* is not *offered*: a launch
-context (`run`, or a bare `spark <TAB>`) never offers an entry whose weights are
-missing, while `forget`/`research`/`download` still name it — marked
-`MISSING WEIGHTS` — since naming it is how it gets cleaned up. `spark forget
-<model>` is the way to drop an entry whose weights are gone.
+* **runnable** — servable weights on disk, registered or not — is the only list
+  ever offered. An unregistered-but-present model runs via a synthesized
+  ephemeral entry (hub models by repo id, store models by path); `spark adopt`
+  promotes it into the registry when it should stay.
+* **missing** — an entry asserting absent weights — is a defect to re-fetch or
+  `forget`, reported as a pointer, never offered. `spark run` refuses it rather
+  than triggering an invisible multi-GB fetch behind a passing health check.
+* **non-servable cache** is counted, never offered (`--all` names it with reasons).
+
+`registry/availability.py` remains the per-entry predicate (one entry vs. disk);
+`inventory.py` is the fleet-wide join (everything on disk vs. all entries). The
+launch preflight, `spark list`, completion, and `catalog.json` (`discovered`
+key, additive to the v1 contract) all consult the same join, so they cannot
+disagree.
 
 
 ---
@@ -418,12 +484,13 @@ The fuzzy `spark <Tab>` menu depends on a chain of files **outside this repo**:
   fuzzy popup; requires `fzf` (Homebrew). Without it, completion degrades to the
   native menu (still works).
 - The completion function calls `command spark __complete models "$ctx"` to get
-  `id<TAB>desc` lines, where `$ctx` is the subcommand being completed (empty at
-  position 2, i.e. a bare `spark <TAB>`). The context is what keeps entries with
-  missing weights out of launch menus while still naming them for `forget`. The
-  preview pane calls `spark __complete describe $word`. **`__complete` must stay
-  fast, stdout-only, and never error** (it's wrapped in try/except and bypasses
-  `build_context`). Breaking it breaks Tab.
+   `id<TAB>desc` lines, where `$ctx` is the subcommand being completed (empty at
+   position 2, i.e. a bare `spark <TAB>`). The context is what keeps entries with
+   missing weights out of launch menus while still naming them for `forget`. The
+   preview pane calls `spark __complete describe $word`, which also describes
+   unregistered-but-present models (with an `adopt` hint). **`__complete` must stay
+   fast, stdout-only, and never error** (it's wrapped in try/except and bypasses
+   `build_context`). Breaking it breaks Tab.
 
 ### 9.4 Hugging Face
 - **Downloads** shell out to the `hf` CLI (`hf download <repo> --local-dir …`),
@@ -499,8 +566,9 @@ data dir are the contract:
   process table. **Changing a field name breaks that reader** — it is a published
   contract, not internal state. The directory is `0700` and the records `0600`.
 - `catalog.json` — the roster: every registered model with availability as of
-  `generated_at` (state, location, bytes, `checked_at`) plus the live instances.
-  Refreshed by `spark list`, `spark catalog`, `download`, `forget`, research
+  `generated_at` (state, location, bytes, `checked_at`), every servable-but-
+  unregistered on-disk model under `discovered`, plus the live instances.
+  Refreshed by `spark list`, `spark catalog`, `download`, `adopt`, `forget`, research
   accept/import, and on server ready/exit. Consumers that need a model list (not
   just the live endpoint) read this instead of parsing `spark list`.
 

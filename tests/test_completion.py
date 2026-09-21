@@ -13,6 +13,7 @@ entry is removed, and `spark research`/`spark download` address it by name.
 
 from __future__ import annotations
 
+import pytest
 from click.testing import CliRunner
 
 from spark.cli.completion import (
@@ -27,6 +28,12 @@ from spark.registry import save_model
 GOOD = "live-9b"
 GONE = "gone-7b"
 UNKNOWN = "opaque-3b"
+
+
+@pytest.fixture(autouse=True)
+def _isolated_hub_cache(tmp_path, monkeypatch):
+    """Completion is disk truth, so tests must not see the real hub cache."""
+    monkeypatch.setenv("HF_HUB_CACHE", str(tmp_path / "hfcache-empty"))
 
 
 def _seed(paths) -> None:

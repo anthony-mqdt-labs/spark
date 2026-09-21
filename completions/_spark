@@ -9,9 +9,10 @@ _spark() {
   subcmds=(
       'run:Launch the optimal runtime for a model'
       'download:Download + register a Hugging Face model'
+      'adopt:Register an on-disk model into the registry'
       'research:Research optimal config for a registered model'
       'doctor:Probe host capabilities and runtimes'
-      'list:List registered models'
+      'list:List what this host can serve'
       'catalog:Print the live model catalog'
       'forget:Remove a model from the registry'
       'secret:Manage secrets (macOS Keychain)'
@@ -39,7 +40,7 @@ _spark() {
   fi
 
   case "${words[2]}" in
-    run|download|research|forget)
+    run|download|research|forget|adopt)
       _describe -t models 'model' models ;;
     secret)
       _values 'secret command' set ls rm get ;;

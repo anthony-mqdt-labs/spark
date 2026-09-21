@@ -6,7 +6,6 @@ import click
 
 from ..errors import SparkError
 from ..probe.host import load_or_probe
-from ..registry import resolve_model
 from ..runner import Supervisor
 from ..runtimes import get_backend, select_backend_for
 from .context import build_context
@@ -26,7 +25,31 @@ def run_command(model: str, backend_override: str | None, dflash: bool,
                 force: bool, reprobe: bool):
     """Launch the best-optimized inference server for MODEL."""
     ctx = build_context()
-    entry = resolve_model(model, ctx.paths)
+    from ..errors import ModelNotFoundError
+    from ..inventory import build_inventory, resolve_for_run
+
+    hit = resolve_for_run(model, ctx.paths, ctx.config)
+    if hit is None:
+        inv = build_inventory(ctx.paths, ctx.config, with_bytes=False)
+        suggestions = inv.runnable_ids[:8]
+        remediation = []
+        if suggestions:
+            remediation.append(f"Runnable here: {', '.join(suggestions)}")
+        remediation += [
+            "See everything: spark list",
+            f"Fetch it: spark download {model}",
+        ]
+        raise ModelNotFoundError(
+            f"No runnable model matches '{model}'.",
+            remediation=remediation,
+            context={"query": model, "runnable": suggestions},
+        )
+    entry = hit.entry
+    if hit.ephemeral:
+        console.print(
+            f"[dim]unregistered weights ({hit.via}) — running as "
+            f"[cyan]{entry.id}[/cyan]; persist with: spark adopt {entry.id}[/dim]"
+        )
 
     if dflash:
         if entry.dflash is None:

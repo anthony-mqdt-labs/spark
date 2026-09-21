@@ -94,64 +94,77 @@ def render_store_issues(issues) -> None:
         console.print(f"    resume: [bold]{resume}[/bold]  ·  clean: rm -rf {i.path}")
 
 
-def models_table(models, avail=None) -> Table:
-    """The registry listing, with a weight-availability column.
+def runnable_table(inv) -> Table:
+    """What this host can serve right now: disk truth, registry or not.
 
-    ``avail`` maps model id -> :class:`~spark.registry.availability.Availability`.
-    Omitted (or missing an id) renders as an em dash, so callers that do not have
-    the check to hand still get a table.
+    Registered models show their backend; discovered-but-unregistered ones show
+    their source (hub/store) and a nudge to `spark adopt`. External runtimes
+    (routers, daemons) are listed too — they own their weights.
     """
-    t = Table(title="Models", expand=False)
+    t = Table(title="Ready to run", expand=False)
     t.add_column("id", style="cyan")
-    t.add_column("avail")
+    t.add_column("src")
     t.add_column("backend")
-    t.add_column("quant", style="dim")
-    t.add_column("format", style="dim")
+    t.add_column("size", style="dim")
     t.add_column("status", style="dim")
-    for m in models:
+    for entry, avail in inv.runnable_registered:
         t.add_row(
-            m.id,
-            _avail_cell((avail or {}).get(m.id)),
-            m.backend or "—",
-            m.quant or "—",
+            entry.id,
+            "[green]weights[/green]",
+            entry.backend or "auto",
+            _fmt_bytes(avail.bytes_present) if avail.bytes_present else "—",
+            entry.research_status,
+        )
+    for entry, _avail in inv.external:
+        t.add_row(entry.id, "[magenta]daemon[/magenta]", entry.backend or "—", "—", entry.research_status)
+    for entry, _avail in inv.unverifiable:
+        t.add_row(entry.id, "[dim]unverified[/dim]", entry.backend or "auto", "—", entry.research_status)
+    for m in inv.runnable_discovered:
+        t.add_row(
+            m.display_id,
+            f"[yellow]{m.source}[/yellow]",
             m.model_format,
-            m.research_status,
+            _fmt_bytes(m.bytes_present) if m.bytes_present else "—",
+            "not registered",
         )
     return t
 
 
-def _avail_cell(a) -> str:
-    if a is None:
-        return "[dim]—[/dim]"
-    if a.state in ("local", "hub"):
-        colour = "green" if a.state == "local" else "cyan"
-        return f"[{colour}]{a.state}[/{colour}] [dim]{_fmt_bytes(a.bytes_present)}[/dim]"
-    if a.state == "missing":
-        colour = "yellow" if a.downloadable else "red"
-        return f"[{colour}]MISSING[/{colour}]"
-    return f"[dim]{a.state}[/dim]"
+def render_inventory_notes(inv, *, verbose: bool = False) -> None:
+    """One-line pointers for everything that is *not* runnable.
 
-
-def render_missing_weights(entries, avail) -> None:
-    """Warn about registered models whose weights are not on this host.
-
-    The inverse of :func:`render_store_issues`: that one finds disk spark cannot
-    see, this one finds entries spark would advertise and then fail to serve.
+    Missing entries name their fix; unregistered runnable models name `adopt`;
+    non-servable cache is a count unless verbose. This keeps the default view
+    to signal (what can run) plus pointers, not pages of defects.
     """
-    gone = [e for e in entries if (avail.get(e.id) is not None and not avail[e.id].ok)]
-    if not gone:
-        return
-    console.print(
-        f"[yellow]![/yellow] [bold]{len(gone)} registered model(s) have no "
-        f"weights on this host[/bold] (the entry outlived the weights):"
-    )
-    for e in gone:
-        a = avail[e.id]
+    if inv.runnable_discovered:
         console.print(
-            f"  • [cyan]{e.id}[/cyan] — {a.detail}"
-            + (f" · {a.location}" if a.location else "")
+            f"[dim]{len(inv.runnable_discovered)} on-disk model(s) not in the registry — "
+            f"run directly, or keep with: spark adopt <repo>[/dim]"
         )
-        if e.hf_repo:
-            console.print(f"    fetch: [bold]spark download {e.hf_repo}[/bold]")
-        console.print(f"    drop the entry: [bold]spark forget {e.id}[/bold]")
+    if inv.missing:
+        console.print(
+            f"[yellow]![/yellow] [bold]{len(inv.missing)} registered model(s) have no "
+            f"weights on this host[/bold]"
+            + (" [dim](--all for details)[/dim]" if not verbose else ":")
+        )
+        if verbose:
+            for entry, avail in inv.missing:
+                loc = f" · {avail.location}" if avail.location else ""
+                console.print(f"  • [cyan]{entry.id}[/cyan] — {avail.detail}{loc}")
+                if entry.hf_repo:
+                    console.print(f"    fetch: [bold]spark download {entry.hf_repo}[/bold]")
+                console.print(f"    drop the entry: [bold]spark forget {entry.id}[/bold]")
+    if inv.non_servable and verbose:
+        console.print(
+            f"[dim]{len(inv.non_servable)} cached repo(s) spark cannot serve "
+            f"(embeddings/speech):[/dim]"
+        )
+        for m in inv.non_servable:
+            console.print(f"  • [dim]{m.display_id} — {m.reason}[/dim]")
+    elif inv.non_servable:
+        console.print(
+            f"[dim]{len(inv.non_servable)} cached repo(s) are not chat models "
+            f"(embeddings/speech) — hidden, see --all[/dim]"
+        )
 
