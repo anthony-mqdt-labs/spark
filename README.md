@@ -193,7 +193,7 @@ spark/
 │   │                              #   so runtimes/mlx_lm.py would shadow real mlx_lm)
 │   ├── probe/                   # host.py (capability detection + cached profile)
 │   ├── registry/                # models.py (one TOML/model, fuzzy resolve)
-│   ├── telemetry/               # jsonl.py (structured logging + redaction)
+│   ├── inventory.py             # disk-first join: store + hub cache vs registry
 │   ├── runner/                  # supervisor.py (spawn/health/restart/attach/signals)
 │   ├── research/                # types/guard/prompt/providers/chain/staging/validate
 │   ├── telemetry/               # jsonl.py (structured logging + redaction)
@@ -647,6 +647,7 @@ A model can pin a `backend`. Otherwise spark walks `general.preference`
 (MLX-first on this host) and picks the first available, format-compatible runtime.
 Vision models (`model_format="mlx-vlm"`) therefore route to `mlx_vlm` even though
 `mlx_lm` is higher preference, because `mlx_lm` isn't format-compatible.
+
 ### D11. Research is validated against the installed server at accept time
 An LLM invents flags (`--max-kv-size` recommended for `mlx_lm`, where it does
 not exist — the failure was a cross-backend leak from `mlx_vlm`) and writes
@@ -657,7 +658,6 @@ through untouched). An unprobable surface (absent binary, hanging `--help`) is
 a warning, never a refusal — the operator's explicit accept outranks a check
 spark could not run. New backends are covered automatically; the check reads
 the live binary, not a hardcoded list.
-
 
 ### D12. prism_ml serves Hadamard packs through a shim, not a fork
 PrismML's v2 packs need the vendor's `runtime/artifact.py` plus a schema-2
