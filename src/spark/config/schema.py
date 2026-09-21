@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-ModelFormat = Literal["mlx", "mlx-vlm", "gguf", "ollama", "safetensors", "any"]
+ModelFormat = Literal["mlx", "mlx-vlm", "gguf", "ollama", "safetensors", "prism", "any"]
 
 
 class _Strict(BaseModel):

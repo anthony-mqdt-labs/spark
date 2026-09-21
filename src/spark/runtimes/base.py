@@ -62,7 +62,6 @@ class Backend:
     @property
     def name(self) -> str:
         return self.rt.name
-
     @property
     def default_port(self) -> int:
         return self.rt.server.default_port
@@ -95,6 +94,15 @@ class Backend:
         ``{model_dir}`` templates use this). Default empty; staged by
         :meth:`prepare` in backends that need it (e.g. oMLX)."""
         return ""
+
+    def api_model_id(self, entry: ModelEntry) -> str:
+        """What a client must send as the request ``model`` field.
+
+        Defaults to the launch ref (true for path/repo-addressed servers);
+        backends whose server ignores the field (prism shim) publish the
+        registry id instead, so consumers don't cargo-cult a snapshot path.
+        """
+        return self.resolve_model_ref(entry)
 
     # -- launch ----------------------------------------------------------------
     def build_launch_cmd(

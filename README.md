@@ -188,6 +188,9 @@ spark/
 │   ├── config/                  # paths.py (platformdirs/XDG), schema.py (pydantic), loader.py
 │   ├── secrets/                 # store.py (ABC + redaction), keychain.py (ctypes Security)
 │   ├── runtimes/                # base.py (Backend ABC + registry) + per-runtime adapters
+│   ├── shims/                     # standalone servers run by foreign interpreters
+│   │                              #   (shim-only dir: a script's dir is on sys.path,
+│   │                              #   so runtimes/mlx_lm.py would shadow real mlx_lm)
 │   ├── probe/                   # host.py (capability detection + cached profile)
 │   ├── registry/                # models.py (one TOML/model, fuzzy resolve)
 │   ├── telemetry/               # jsonl.py (structured logging + redaction)
@@ -656,6 +659,17 @@ spark could not run. New backends are covered automatically; the check reads
 the live binary, not a hardcoded list.
 
 
+### D12. prism_ml serves Hadamard packs through a shim, not a fork
+PrismML's v2 packs need the vendor's `runtime/artifact.py` plus a schema-2
+loader (multimodal namespace, string dtypes mlx≥0.32 rejects) that no stock
+server has. Rather than forking mlx_lm, spark runs a stdlib-HTTP shim
+(`shims/prism_shim.py`, OpenAI-compatible) on the mlx-lm tool interpreter as a
+supervised child — D1 intact (subprocess, no new spark deps). The `prism`
+model format exists so these packs route to `prism_ml` and can never fall
+through to stock `mlx_lm`, which rejects them at load. Text tower only: the
+vision weights are skipped with a logged note, and the published API id is the
+registry id (the shim ignores the request `model` field).
+
 ---
 
 ## 11. Failure handling & logging contract
@@ -681,7 +695,7 @@ result), `process_crash`, `restart_scheduled`, `process_exit` (wall time, peak R
 
 ## 12. Testing
 
-`uv run pytest` — 76 tests, no live LLM/Keychain required for the suite (the
+`uv run pytest` — 221 tests, no live LLM/Keychain required for the suite (the
 Keychain roundtrip test self-skips off macOS; research uses fake providers and a
 real-subprocess JSON test that needs no model). Coverage spans: config
 merge/precedence, secret redaction + name validation, Keychain roundtrip, probe

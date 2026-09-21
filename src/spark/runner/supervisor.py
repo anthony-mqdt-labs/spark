@@ -476,7 +476,7 @@ class Supervisor:
                 base_url=base, backend=self.backend.name, port=port,
                 elapsed_s=time.monotonic() - since, log_path=str(self._log_path),
                 note=note,
-                api_model_id=self.backend.resolve_model_ref(self.entry),
+                api_model_id=self.backend.api_model_id(self.entry),
             ))
 
     def _publish_instance(self, base: str, port: int, health_url: str) -> None:
@@ -488,7 +488,7 @@ class Supervisor:
         self._publisher = InstancePublisher(
             self.paths,
             alias=self.entry.id,
-            api_model_id=self.backend.resolve_model_ref(self.entry),
+            api_model_id=self.backend.api_model_id(self.entry),
             backend=self.backend.name,
             base_url=base,
             port=port,
@@ -507,7 +507,7 @@ class Supervisor:
         self.log.info(
             "supervisor", "instance_published",
             model=self.entry.id, port=port, path=str(path),
-            api_model_id=self.backend.resolve_model_ref(self.entry),
+            api_model_id=self.backend.api_model_id(self.entry),
         )
 
     def _run(self, on_ready: Callable[[ReadyInfo], None] | None) -> LaunchResult:

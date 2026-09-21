@@ -1,0 +1,37 @@
+# PrismML — Hadamard-packed ternary/q2 checkpoints (e.g. Ternary-Bonsai-2).
+#
+# These packs are generative MLX weights, but stock mlx_lm cannot load them:
+# the checkpoint's `model_type` (prism_hadamard_qwen35) needs the vendor's
+# bundled loader (`runtime/artifact.py` in the snapshot), which applies the
+# Hadamard activation/embedding transforms ordinary loaders omit. So this
+# backend serves them through a small stdlib-HTTP shim
+# (`src/spark/shims/prism_shim.py`, OpenAI-compatible) run by the mlx-lm
+# tool interpreter — the same env that already holds mlx + mlx_lm.
+#
+# The interpreter path below is machine-specific on purpose (schema expands
+# `~`): it must be the interpreter that owns mlx/mlx_lm, not spark's own venv
+# (D1: spark never imports ML libraries; it drives them as subprocesses).
+name = "prism_ml"
+description = "PrismML Hadamard-packed checkpoints via the bundled loader + stdlib HTTP shim."
+model_format = "prism"
+requires_os = ["Darwin"]
+requires_arch = ["arm64"]
+install_hint = "uv tool install mlx-lm   (provides the mlx toolchain the shim runs on)"
+
+[detect]
+binary = "~/.local/share/uv/tools/mlx-lm/bin/python"
+version_args = ["--version"]
+# Read the mlx-lm dist version from the shim's own interpreter.
+version_package = "mlx-lm"
+
+[server]
+binary = "~/.local/share/uv/tools/mlx-lm/bin/python"
+# argv is composed by the adapter (shim path is package data, not expressible
+# in TOML); this template is intentionally empty.
+args_template = []
+openai_compatible = true
+default_port = 8098
+health_path = "/v1/models"
+# A 27B pack takes a minute or two to materialize (plus one-time Metal kernel
+# compile on a fresh toolchain); generous headroom, supervisor still heartbeats.
+ready_timeout_s = 300.0
