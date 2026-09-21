@@ -19,6 +19,7 @@ from .prompt import build_request, host_summary
 from .providers import CliAgentProvider, ResearchProvider, build_providers
 from .staging import apply_output_to_entry, delete_staged, load_staged, stage
 from .types import ResearchOutput, ResearchRequest, RuntimeRec
+from .validate import known_flags, normalize_quant, validate_accept, validate_flags
 
 __all__ = [
     "ResearchChain",
@@ -37,6 +38,10 @@ __all__ = [
     "load_staged",
     "delete_staged",
     "apply_output_to_entry",
+    "normalize_quant",
+    "known_flags",
+    "validate_flags",
+    "validate_accept",
     "run_research",
 ]
 

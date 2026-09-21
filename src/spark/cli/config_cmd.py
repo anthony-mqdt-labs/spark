@@ -52,7 +52,7 @@ def config_review(model: str, accept: bool, reject: bool):
     import json as _json
 
     from ..registry import resolve_model, save_model
-    from ..research import apply_output_to_entry, delete_staged, load_staged
+    from ..research import delete_staged, load_staged
     from ..research.types import ResearchOutput
     from .context import build_context, refresh_catalog
 
@@ -74,13 +74,30 @@ def config_review(model: str, accept: bool, reject: bool):
         return
     if accept:
         output = ResearchOutput.model_validate(staged["output"])
-        apply_output_to_entry(entry, output)
-        save_model(entry, ctx.paths)
+        from ..research.validate import validate_accept
+
+        candidate, errors, warnings = validate_accept(entry, output, ctx.config)
+        for w in warnings:
+            console.print(f"[yellow]![/yellow] [dim]{w}[/dim]")
+        if errors:
+            from ..errors import ConfigError
+
+            raise ConfigError(
+                f"Staged research for '{entry.id}' names flags its backend does not have.",
+                code="CFG_RESEARCH_FLAGS",
+                remediation=[
+                    *[f"Drop it: {e}" for e in errors],
+                    f"Or hand-edit the entry: {ctx.paths.models_dir / (entry.id + '.toml')}",
+                    f"Or re-run: spark research {entry.id} (staging is kept until --accept/--reject)",
+                ],
+                context={"model": entry.id, "backend": candidate.backend},
+            )
+        save_model(candidate, ctx.paths)
         delete_staged(ctx.paths, entry.id)
-        ctx.telemetry.info("research", "accepted", model=entry.id, backend=entry.backend)
-        refresh_catalog(ctx, model_id=entry.id)
-        console.print(f"[green]✓[/green] applied → backend=[magenta]{entry.backend}[/magenta], "
-                      f"quant={entry.quant or '—'}")
+        ctx.telemetry.info("research", "accepted", model_id=candidate.id, backend=candidate.backend)
+        refresh_catalog(ctx, model_id=candidate.id)
+        console.print(f"[green]✓[/green] applied → backend=[magenta]{candidate.backend}[/magenta], "
+                      f"quant={candidate.quant or '—'}")
         return
     console.print("\n[dim]--accept to apply, --reject to discard[/dim]")
 
@@ -93,8 +110,8 @@ def config_import(model: str):
     import sys
 
     from ..registry import resolve_model, save_model
-    from ..research import apply_output_to_entry
     from ..research.types import ResearchOutput
+    from ..research.validate import validate_accept
     from .context import build_context, refresh_catalog
 
     ctx = build_context()
@@ -113,8 +130,22 @@ def config_import(model: str):
                          "See `spark config show` and the research schema."],
             cause=exc,
         ) from exc
-    apply_output_to_entry(entry, output)
-    save_model(entry, ctx.paths)
-    ctx.telemetry.info("research", "imported", model=entry.id, backend=entry.backend)
-    refresh_catalog(ctx, model_id=entry.id)
-    console.print(f"[green]✓[/green] imported → backend=[magenta]{entry.backend}[/magenta]")
+    candidate, errors, warnings = validate_accept(entry, output, ctx.config)
+    for w in warnings:
+        console.print(f"[yellow]![/yellow] [dim]{w}[/dim]")
+    if errors:
+        from ..errors import ConfigError
+
+        raise ConfigError(
+            f"Imported research for '{entry.id}' names flags its backend does not have.",
+            code="CFG_RESEARCH_FLAGS",
+            remediation=[
+                *[f"Drop it: {e}" for e in errors],
+                f"Or hand-edit the entry after importing without overrides.",
+            ],
+            context={"model": entry.id, "backend": candidate.backend},
+        )
+    save_model(candidate, ctx.paths)
+    ctx.telemetry.info("research", "imported", model_id=candidate.id, backend=candidate.backend)
+    refresh_catalog(ctx, model_id=candidate.id)
+    console.print(f"[green]✓[/green] imported → backend=[magenta]{candidate.backend}[/magenta]")
