@@ -22,7 +22,11 @@ python_requires = ["torch", "torchvision"]
 [server]
 binary = "mlx_vlm.server"
 # NOTE: mlx_vlm.server defaults to host 0.0.0.0 — we pin loopback explicitly.
-args_template = ["--model", "{model_path}", "--host", "{host}", "--port", "{port}"]
+# --model-discovery served: /v1/models lists only the served model, not every
+# MLX-shaped repo in the hub cache (embedders, TTS, …) — harness pickers that
+# read the endpoint only ever offer what this server actually serves.
+args_template = ["--model", "{model_path}", "--host", "{host}", "--port", "{port}",
+                 "--model-discovery", "served"]
 openai_compatible = true
 default_port = 8095
 health_path = "/v1/models"

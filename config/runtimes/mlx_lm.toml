@@ -21,6 +21,12 @@ openai_compatible = true
 default_port = 8095
 health_path = "/v1/models"
 ready_timeout_s = 180.0
+# Filter the model listing: launch behind shims/openai_filter_proxy.py so
+# GET /v1/models answers from spark's inventory (registered ∩ present) instead
+# of mlx_lm.server's own hub-cache scan (which advertises embeddings/speech to
+# harness pickers). mlx_lm has no --model-discovery switch; this is the only
+# way. Pass-through for everything else, one supervised child either way.
+filter_models = true
 
 # Gated/private HF repos need a token; injected into child env only, never logged.
 [server.secret_env]

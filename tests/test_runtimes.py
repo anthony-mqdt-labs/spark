@@ -12,12 +12,21 @@ from spark.runtimes import get_backend, select_backend_for
 
 def test_mlx_launch_cmd_fills_placeholders():
     cfg = load_config()
+    cfg.runtimes["mlx_lm"].server.filter_models = False  # direct shape
     b = get_backend("mlx_lm", cfg)
     entry = ModelEntry(id="m", path="/models/m", model_format="mlx")
     cmd = b.build_launch_cmd(entry, "127.0.0.1", 8080)
     assert cmd[0] == "mlx_lm.server"
     assert "--model" in cmd and "/models/m" in cmd
     assert "127.0.0.1" in cmd and "8080" in cmd
+
+
+def test_mlx_launch_cmd_proxied_by_default():
+    """Bundled config filters the listing: the supervised child is the proxy,
+    carrying the real server argv after `--` (shape pinned in
+    test_filter_proxy.py)."""
+    cfg = load_config()
+    assert cfg.runtimes["mlx_lm"].server.filter_models is True
 
 
 def test_llama_cmd_includes_metal_offload_local_gguf(tmp_path):

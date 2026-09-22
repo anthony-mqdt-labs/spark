@@ -71,6 +71,12 @@ class ServerSpec(_Strict):
     # Daemon-style backends (e.g. ollama): if the endpoint is already healthy,
     # attach to it instead of spawning, and never terminate it on shutdown.
     attach_if_running: bool = False
+    # Route the server behind shims/openai_filter_proxy.py: the proxy binds the
+    # published port, spawns this server on an ephemeral loopback port, and
+    # answers GET /v1/models from spark's inventory (registered ∩ present)
+    # instead of the runtime's own cache scan. For runtimes whose listing
+    # cannot be restricted any other way (mlx_lm has no --model-discovery).
+    filter_models: bool = False
     # Extra non-secret env for the child process.
     env: dict[str, str] = Field(default_factory=dict)
     # Map of CHILD_ENV_VAR -> secret name in the vault. Resolved at spawn time and

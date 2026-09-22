@@ -384,7 +384,13 @@ unknown names fall back to the generic `Backend`. Key methods:
 
 Adapters and their quirks:
 - **`mlx_lm`** — `mlx_lm.server --model <path|repo> --host --port`; accepts a local
-  dir or an HF repo id. Primary text path. Ports default 8080.
+  dir or an HF repo id. Primary text path. Ports default 8080. Runs behind
+  `shims/openai_filter_proxy.py` (`[server] filter_models=true`): the proxy binds
+  the published port, spawns the real server on an ephemeral loopback port, and
+  answers `GET /v1/models` from spark's inventory (registered ∩ present,
+  mlx-servable) instead of the server's hub-cache scan — so harness pickers never
+  see embeddings/speech. Everything else passes through; still one supervised
+  child (proxy exits when the backend dies, taking it down for restart).
 - **`mlx_vlm`** — `mlx_vlm.server`; vision. Its binary defaults to host `0.0.0.0`,
   so the template **pins `--host 127.0.0.1`** (no LAN exposure). Port 8081.
 - **`llama_cpp`** — resolves to a local `.gguf` file (`--model`, picks the
@@ -670,6 +676,16 @@ through to stock `mlx_lm`, which rejects them at load. Text tower only: the
 vision weights are skipped with a logged note, and the published API id is the
 registry id (the shim ignores the request `model` field).
 
+### D13. mlx_lm's listing is filtered by a sidecar, not by flags
+`mlx_lm.server` has no `--model-discovery` switch (`mlx_vlm` does — its template
+sets `served`), so its `/v1/models` always reflects the hub-cache scan. The
+filter proxy exists for exactly this gap: stdlib HTTP, binds the published port,
+spawns the real server as its child on an ephemeral port, filters only
+`GET /v1/models` (served id + registered ∩ present mlx-servable ids), and exits
+when the backend dies so the supervisor restarts the unit — child reaped first,
+never orphaned. Opt-in per backend (`[server] filter_models`, default off);
+generation is never gated, only the listing.
+
 ---
 
 ## 11. Failure handling & logging contract
@@ -695,7 +711,7 @@ result), `process_crash`, `restart_scheduled`, `process_exit` (wall time, peak R
 
 ## 12. Testing
 
-`uv run pytest` — 221 tests, no live LLM/Keychain required for the suite (the
+`uv run pytest` — 231 tests, no live LLM/Keychain required for the suite (the
 Keychain roundtrip test self-skips off macOS; research uses fake providers and a
 real-subprocess JSON test that needs no model). Coverage spans: config
 merge/precedence, secret redaction + name validation, Keychain roundtrip, probe
