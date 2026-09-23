@@ -112,6 +112,12 @@ class AmbiguousModelError(ModelError):
     code = "MODEL_AMBIGUOUS"
 
 
+class AlreadyRegisteredError(ModelError):
+    """The weights are already registered — there is nothing to adopt."""
+
+    code = "MODEL_ALREADY_REGISTERED"
+
+
 class WeightsMissingError(ModelError):
     """The entry asserts weights that are not on this host.
 

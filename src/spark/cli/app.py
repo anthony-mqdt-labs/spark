@@ -110,6 +110,247 @@ def catalog_command(as_json: bool, refresh: bool):
             console.print(f"    • [cyan]{d['id']}[/cyan] [dim]({d['source']})[/dim]")
 
 
+def _adopt_miss_error(repo: str, inv, ctx) -> SparkError:
+    """State-aware error for `spark adopt <query>` when nothing was adopted.
+
+    The old message always said "nothing adoptable", even when the query was
+    already registered (the common confusion: the `status` column shows
+    research state — `pending` — not download state). Report what the query
+    actually is: already registered (with backend/research/weights state),
+    cached-but-not-servable, a partial store download, an incomplete hub
+    snapshot, or genuinely unknown.
+    """
+    from pathlib import Path
+
+    from ..errors import (
+        AlreadyRegisteredError,
+        AmbiguousModelError,
+        ModelNotFoundError,
+    )
+
+    target = repo.strip()
+    tl = target.lower()
+
+    registered = [
+        (e, a)
+        for group in (
+            inv.runnable_registered,
+            inv.missing,
+            inv.external,
+            inv.unverifiable,
+        )
+        for e, a in group
+    ]
+
+    def _registry_exact():
+        for e, a in registered:
+            if e.id.lower() == tl:
+                return e, a
+            if any(al.lower() == tl for al in e.aliases):
+                return e, a
+            if (e.hf_repo or "").lower() == tl:
+                return e, a
+            loc = getattr(a, "location", "") or ""
+            if loc and (loc == target or loc.lower() == tl):
+                return e, a
+            if e.path and (e.path == target or e.path.lower() == tl):
+                return e, a
+        return None
+
+    hit = _registry_exact()
+    if hit is not None:
+        entry, avail = hit
+        backend = entry.backend or "auto"
+        research = entry.research_status
+        state = getattr(avail, "state", "?")
+        detail = getattr(avail, "detail", "")
+        location = getattr(avail, "location", "") or ""
+        if state == "missing":
+            weights = f"weights missing ({detail})" if detail else "weights missing"
+        elif state in ("local", "hub"):
+            weights = f"weights present ({state}{f': {location}' if location else ''})"
+        elif state == "external":
+            weights = f"weights owned by '{entry.backend}' runtime"
+        elif state == "unverifiable":
+            weights = "entry declares neither path nor hf_repo"
+        else:
+            weights = f"weights state: {state}"
+        message = (
+            f"'{repo}' is already registered as '{entry.id}' — nothing to adopt.\n"
+            f"backend: {backend} · research: {research} · {weights}"
+        )
+        if state == "missing":
+            remediation = (
+                [f"Fetch weights: spark download {entry.hf_repo}"]
+                if entry.hf_repo
+                else []
+            )
+            remediation += [f"Drop the entry: spark forget {entry.id}"]
+        elif research == "pending":
+            # The exact confusion that prompted this: `pending` in `spark list`
+            # is research state, not download state. Weights are already here.
+            remediation = [
+                f"Weights are on disk — no adopt needed. Research next: spark research {entry.id}",
+                f"Or just run it: spark run {entry.id}",
+            ]
+        else:
+            remediation = [f"Run it: spark run {entry.id}"]
+        return AlreadyRegisteredError(
+            message,
+            remediation=remediation,
+            context={
+                "query": repo,
+                "model_id": entry.id,
+                "backend": entry.backend,
+                "research_status": research,
+                "availability": state,
+                "location": location,
+            },
+        )
+
+    # Ambiguous registry prefix/substring (adopt takes one model).
+    prefix = [e for e, _ in registered if e.id.lower().startswith(tl)]
+    substr = [e for e, _ in registered if tl in e.id.lower()]
+    candidates = prefix or substr
+    if len(candidates) > 1:
+        ids = sorted({e.id for e in candidates})
+        return AmbiguousModelError(
+            f"'{repo}' matches multiple registered models.",
+            remediation=[f"Be more specific: {', '.join(ids)}"],
+            context={"query": repo, "matches": ids},
+        )
+
+    # Cached repos spark cannot serve (embedders, speech). Never adoptable,
+    # but the query *is* on disk — say so instead of "nothing matches".
+    def _non_servable_hits():
+        exact = [m for m in inv.non_servable if m.display_id.lower() == tl]
+        if exact:
+            return exact
+        tails = [
+            m
+            for m in inv.non_servable
+            if m.display_id.lower().split("/")[-1] == tl
+        ]
+        if tails:
+            return tails
+        pre = [m for m in inv.non_servable if m.display_id.lower().startswith(tl)]
+        if pre:
+            return pre
+        return [m for m in inv.non_servable if tl in m.display_id.lower()]
+
+    ns_hits = _non_servable_hits()
+    if ns_hits:
+        m = ns_hits[0]
+        others = f" (+{len(ns_hits) - 1} more)" if len(ns_hits) > 1 else ""
+        return ModelNotFoundError(
+            f"'{repo}' is cached as '{m.display_id}'{others} but spark cannot serve it "
+            f"({m.kind}) — {m.reason}. Nothing to adopt.",
+            remediation=[
+                "Adoptable models are the unregistered runnable rows of: spark list",
+                "Inspect the hidden cache: spark list --all",
+            ],
+            context={"query": repo, "kind": m.kind, "reason": m.reason},
+        )
+
+    # Partial / orphaned store dirs own their message (resume, don't adopt).
+    try:
+        from ..registry.store import scan_store
+
+        issues = scan_store(ctx.paths)
+    except OSError:
+        issues = []
+    for issue in issues:
+        if (
+            issue.model_id.lower() == tl
+            or str(issue.path) == target
+            or issue.model_id.lower().split("/")[-1] == tl
+        ):
+            if issue.incomplete_files:
+                resume = (
+                    f"spark download {issue.hf_repo}"
+                    if issue.hf_repo
+                    else f"spark download <hf-repo> --id {issue.model_id}"
+                )
+                return ModelNotFoundError(
+                    f"'{repo}' is an incomplete download in the model store "
+                    f"({issue.incomplete_files} resume fragment(s)) — resume it, don't adopt it.",
+                    remediation=[
+                        f"Resume: {resume}",
+                        f"Clean: rm -rf {issue.path}",
+                    ],
+                    context={"query": repo, "path": str(issue.path)},
+                )
+            return ModelNotFoundError(
+                f"'{repo}' is in the model store but has no servable snapshot "
+                f"({issue.path}) — nothing to adopt yet.",
+                remediation=[
+                    "Adoptable models are the unregistered runnable rows of: spark list",
+                    f"Clean: rm -rf {issue.path}",
+                ],
+                context={"query": repo, "path": str(issue.path)},
+            )
+
+    # Hub cache dir exists but no complete snapshot (mid-download / reclaimed).
+    if "/" in target:
+        try:
+            from ..hf_cache import repo_dir, snapshot_dir
+
+            if repo_dir(target).is_dir() and snapshot_dir(target) is None:
+                return ModelNotFoundError(
+                    f"'{repo}' is in the HF hub cache but has no complete snapshot "
+                    f"(no config.json) — interrupted download or reclaimed weights.",
+                    remediation=[
+                        f"Resume: spark download {target}",
+                        "Adoptable models are the unregistered runnable rows of: spark list",
+                    ],
+                    context={"query": repo},
+                )
+        except OSError:
+            pass
+        # Case-insensitive hub hit (hub ids are case-sensitive on disk, but the
+        # operator often retypes them lowercased): point at the real row.
+        try:
+            from ..hf_cache import hf_cache_root
+
+            root = hf_cache_root()
+            want = target.replace("/", "--").lower()
+            if root.is_dir():
+                for d in root.iterdir():
+                    if d.name.startswith("models--") and d.name[len("models--"):].lower() == want:
+                        real = d.name[len("models--"):].replace("--", "/")
+                        return ModelNotFoundError(
+                            f"Nothing adoptable matches '{repo}' (case differs from cached '{real}').",
+                            remediation=[
+                                f"Check the exact row: spark list | grep -i {Path(target).name}",
+                                "Adoptable models are the unregistered runnable rows of: spark list",
+                            ],
+                            context={"query": repo, "cached": real},
+                        )
+        except OSError:
+            pass
+
+    if inv.runnable_discovered:
+        sample = ", ".join(m.display_id for m in inv.runnable_discovered[:5])
+        more = f" (+{len(inv.runnable_discovered) - 5} more)" if len(inv.runnable_discovered) > 5 else ""
+        return ModelNotFoundError(
+            f"Nothing adoptable matches '{repo}'.",
+            remediation=[
+                f"Adoptable now: {sample}{more}",
+                "Adoptable models are the unregistered rows of: spark list",
+                f"Or download it first: spark download {repo}",
+            ],
+            context={"query": repo},
+        )
+    return ModelNotFoundError(
+        f"Nothing adoptable matches '{repo}'.",
+        remediation=[
+            "Adoptable models are the unregistered rows of: spark list",
+            f"Or download it first: spark download {repo}",
+        ],
+        context={"query": repo},
+    )
+
+
 @click.command(name="adopt")
 @click.argument("repo")
 @click.option("--id", "model_id", default=None, help="Registry id (default: repo tail slug).")
@@ -131,22 +372,34 @@ def adopt_command(repo: str, model_id: str | None, backend: str):
     ctx = build_context()
     inv = build_inventory(ctx.paths, ctx.config, with_bytes=False)
     target = repo.strip()
+    tl = target.lower()
     found = None
     for m in inv.runnable_discovered:
-        if m.display_id.lower() == target.lower() or m.location == target:
+        if m.display_id.lower() == tl or m.location == target:
             found = m
             break
     if found is None:
-        from ..errors import ModelNotFoundError
-
-        raise ModelNotFoundError(
-            f"Nothing adoptable matches '{repo}'.",
-            remediation=[
-                "Adoptable models are the unregistered rows of: spark list",
-                f"Or download it first: spark download {repo}",
-            ],
-            context={"query": repo},
-        )
+        # Forgiving match: unique tail slug (`bonsai-8b` for
+        # `prism-ml/Ternary-Bonsai-8B-mlx-2bit`), then unique prefix/substring.
+        tails = [
+            m
+            for m in inv.runnable_discovered
+            if m.display_id.lower().split("/")[-1] == tl
+        ]
+        if len(tails) == 1:
+            found = tails[0]
+        else:
+            prefix = [
+                m for m in inv.runnable_discovered if m.display_id.lower().startswith(tl)
+            ]
+            substr = [
+                m for m in inv.runnable_discovered if tl in m.display_id.lower()
+            ]
+            unique = prefix if len(prefix) == 1 else (substr if len(substr) == 1 else [])
+            if unique:
+                found = unique[0]
+    if found is None:
+        raise _adopt_miss_error(repo, inv, ctx)
     slug = model_id or re.sub(r"[^A-Za-z0-9_.-]+", "-", found.display_id.split("/")[-1]).strip("-").lower()
     entry = ModelEntry(
         id=slug,
