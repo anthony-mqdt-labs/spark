@@ -351,9 +351,9 @@ def _write_cache(profile: HostProfile, cache_path: Path, fingerprint: str) -> No
     # Hand-serialize a small TOML (avoids adding a TOML *writer* dependency).
     lines = [
         "# spark host profile cache (auto-generated; safe to delete).",
-        f'os = "{profile.os}"',
-        f'arch = "{profile.arch}"',
-        f'chip = "{profile.chip}"',
+        f"os = {_toml_str(profile.os)}",
+        f"arch = {_toml_str(profile.arch)}",
+        f"chip = {_toml_str(profile.chip)}",
         f"total_memory_bytes = {profile.total_memory_bytes}",
         f"cpu_count = {profile.cpu_count}",
         f"probed_at = {profile.probed_at}",
@@ -361,8 +361,8 @@ def _write_cache(profile: HostProfile, cache_path: Path, fingerprint: str) -> No
         "",
     ]
     for name, s in profile.runtimes.items():
-        lines.append(f"[runtimes.{name}]")
-        lines.append(f'name = "{s.name}"')
+        lines.append(f"[runtimes.{_toml_str(name)}]")
+        lines.append(f"name = {_toml_str(s.name)}")
         lines.append(f"available = {str(s.available).lower()}")
         lines.append(f'reason = {_toml_str(s.reason)}')
         lines.append(f'path = {_toml_str(s.path)}')
@@ -370,7 +370,9 @@ def _write_cache(profile: HostProfile, cache_path: Path, fingerprint: str) -> No
         lines.append(f'install_hint = {_toml_str(s.install_hint)}')
         lines.append("")
     cache_path.parent.mkdir(parents=True, exist_ok=True)
-    cache_path.write_text("\n".join(lines), encoding="utf-8")
+    tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")
+    tmp.write_text("\n".join(lines), encoding="utf-8")
+    tmp.replace(cache_path)  # a concurrent reader never sees half a profile
 
 
 def _toml_str(s: str) -> str:

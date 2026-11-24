@@ -118,10 +118,16 @@ def resolve_availability(
     if entry.path:
         p = Path(entry.path).expanduser()
         if p.is_dir() or p.is_file():
-            if p.is_dir():
-                size = bytes_in(p) if with_bytes else (1 if any(p.iterdir()) else 0)
-            else:
-                size = p.stat().st_size
+            try:
+                if p.is_dir():
+                    size = bytes_in(p) if with_bytes else (1 if any(p.iterdir()) else 0)
+                else:
+                    size = p.stat().st_size
+            except OSError as exc:  # permissions, a vanished mount: report, never crash a listing
+                return Availability(
+                    state=UNVERIFIABLE, detail=f"cannot read weights ({type(exc).__name__})",
+                    location=str(p), downloadable=bool(entry.hf_repo),
+                )
             if size > 0:
                 return Availability(
                     state=LOCAL, detail="in the spark model store",

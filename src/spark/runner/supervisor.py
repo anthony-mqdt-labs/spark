@@ -27,9 +27,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..budget import check_disk, check_memory
-from ..catalog import InstancePublisher, write_catalog
+from ..catalog import InstancePublisher, read_instances, write_catalog
 from ..config.paths import SparkPaths
-from ..config.schema import ModelEntry, SparkConfig
+from ..config.schema import ModelEntry, SparkConfig, id_file_stem
 from ..errors import (
     HealthCheckError,
     InsufficientDiskError,
@@ -131,9 +131,10 @@ class Supervisor:
         self._proc: subprocess.Popen | None = None
         self._peak_rss = 0
         self._publisher: InstancePublisher | None = None
+        self._prev_signals: dict[int, object] = {}
         # Child stdout/stderr are redirected here (not the terminal) to keep the
         # CLI output clean; tailed on failure so the reason still surfaces.
-        self._log_path = paths.log_dir / "servers" / f"{entry.id}.log"
+        self._log_path = paths.log_dir / "servers" / f"{id_file_stem(entry.id)}.log"
         self._log_fh = None
 
     @property
@@ -197,6 +198,24 @@ class Supervisor:
                     "model": self.entry.id, "state": avail.state,
                     "detail": avail.detail, "repo": self.entry.hf_repo,
                 },
+            )
+
+        # Already serving? A second server for the same alias doubles resident
+        # memory and clobbers the first one's published record (records are
+        # keyed by alias), so a consumer loses a live endpoint when either exits.
+        live = [
+            r for r in read_instances(self.paths)
+            if r.get("model_alias") == self.entry.id and r.get("pid") != os.getpid()
+        ]
+        if live and not self.force:
+            raise LaunchError(
+                f"'{self.entry.id}' is already being served at {live[0].get('base_url')}.",
+                code="RUN_ALREADY_SERVING",
+                remediation=[
+                    f"Use that endpoint (spark pid {live[0].get('pid')}), or stop it first.",
+                    "Run a second copy anyway (doubles memory): --force",
+                ],
+                context={"model": self.entry.id, "pid": live[0].get("pid")},
             )
 
         # Memory budget.
@@ -381,8 +400,11 @@ class Supervisor:
             # hard kill (SIGKILL, power loss), which is the one case where
             # removal on exit never happens.
             if self._publisher is not None:
-                self._publisher.maybe_heartbeat()
-            time.sleep(interval)
+                try:
+                    self._publisher.maybe_heartbeat()
+                except OSError as exc:
+                    self.log.warn("supervisor", "instance_heartbeat_failed", error=repr(exc))
+            self._stop.wait(interval)
         return "stop_requested"
 
     # -- lifecycle -------------------------------------------------------------
@@ -392,6 +414,8 @@ class Supervisor:
             exe=cmd[0], argc=len(cmd), backend=self.backend.name,
             model=self.entry.id, cwd=str(Path.cwd()),
         )
+        if self._log_fh is None:
+            self._log_fh = self._open_server_log()
         try:
             # Child stdout+stderr go to the per-run log file, not the terminal, so
             # the CLI stays clean (Vite-style). The log is tailed on failure.
@@ -407,21 +431,40 @@ class Supervisor:
                 f"Runtime binary not found: {cmd[0]}",
                 remediation=[
                     f"Install it: {self.backend.rt.install_hint or 'see `spark doctor`'}",
+                    "Uninstalled since the last probe? Re-detect: spark run <model> --reprobe",
                 ],
                 context={"binary": cmd[0]},
                 cause=exc,
             ) from exc
 
+    #: Roll the server log once it passes this size (one previous copy kept).
+    LOG_ROLL_BYTES = 64 * 2**20
+
+    def _open_server_log(self):
+        """Opened at first spawn — after preflight — and in append mode.
+
+        Opening it ``"w"`` up front meant a launch refused in preflight (e.g. the
+        model is already being served) truncated the *live* server's log while
+        its child kept writing at the old offset: a NUL-padded, sparse file.
+        """
+        self._log_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            if self._log_path.stat().st_size > self.LOG_ROLL_BYTES:
+                self._log_path.replace(self._log_path.with_suffix(".log.1"))
+        except OSError:
+            pass  # absent (first run) or unrollable: append regardless
+        return open(self._log_path, "a", buffering=1)
+
     def _terminate(self) -> None:
         if not self._proc or self._proc.poll() is not None:
             return
         grace = self.config.supervisor.shutdown_grace_s
-        self.log.info("supervisor", "shutdown_initiated", pid=self._proc.pid, grace_s=grace)
+        self.log.info("supervisor", "shutdown_initiated", child_pid=self._proc.pid, grace_s=grace)
         try:
             self._proc.terminate()
             self._proc.wait(timeout=grace)
         except subprocess.TimeoutExpired:
-            self.log.warn("supervisor", "shutdown_force_kill", pid=self._proc.pid)
+            self.log.warn("supervisor", "shutdown_force_kill", child_pid=self._proc.pid)
             self._proc.kill()
             try:
                 self._proc.wait(timeout=5)
@@ -433,23 +476,32 @@ class Supervisor:
             self.log.info("supervisor", "signal_received", signal=signum)
             self._stop.set()
 
-        signal.signal(signal.SIGINT, handler)
-        signal.signal(signal.SIGTERM, handler)
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                self._prev_signals[sig] = signal.signal(sig, handler)
+            except ValueError:  # not the main thread (tests, embedding)
+                pass
+
+    def _restore_signals(self) -> None:
+        for sig, prev in self._prev_signals.items():
+            signal.signal(sig, prev)
+        self._prev_signals.clear()
 
     def _monitor_attached(self, url: str) -> str:
         """Watch an attached (not-owned) endpoint until stop requested."""
-        interval = self.config.supervisor.health_interval_s
-        while not self._stop.is_set():
-            time.sleep(interval)
+        while not self._stop.wait(1.0):  # timed: stays responsive to signals
+            pass
         return "stop_requested"
 
     # -- public ----------------------------------------------------------------
     def run(self, on_ready: Callable[[ReadyInfo], None] | None = None) -> LaunchResult:
-        self._log_path.parent.mkdir(parents=True, exist_ok=True)
-        self._log_fh = open(self._log_path, "w", buffering=1)
         try:
             return self._run(on_ready)
         finally:
+            # Any exit path — including an exception spark did not anticipate —
+            # must not orphan a multi-GB server holding the port and the RAM.
+            self._terminate()
+            self._restore_signals()
             # Whatever happened — clean stop, crash, exhausted recovery, or an
             # error before launch — a published instance must not outlive the
             # server it describes, and the catalog must reflect the exit.
@@ -509,6 +561,12 @@ class Supervisor:
             model=self.entry.id, port=port, path=str(path),
             api_model_id=self.backend.api_model_id(self.entry),
         )
+        # The roster promises "refreshed on server ready"; without this a
+        # consumer reading catalog.json sees no live instance until exit.
+        try:
+            write_catalog(self.paths, self.config)
+        except Exception as exc:  # noqa: BLE001 - publishing is a courtesy
+            self.log.warn("supervisor", "catalog_write_failed", error=repr(exc))
 
     def _run(self, on_ready: Callable[[ReadyInfo], None] | None) -> LaunchResult:
         t0 = time.monotonic()
@@ -533,19 +591,39 @@ class Supervisor:
             return LaunchResult(base, self.backend.name, port, 0)
 
         cmd = self.backend.build_launch_cmd(self.entry, host, port)
+        if not cmd:
+            # Attach-only backends (relay) have nothing to spawn: an unhealthy
+            # endpoint is terminal here, not a crash inside Popen([]).
+            raise LaunchError(
+                f"'{self.backend.name}' endpoint is not healthy and spark has nothing to spawn.",
+                remediation=[
+                    f"Start the external service, then retry. Probe: curl -s {url}",
+                    "Check the runtime's relay_base_url in your spark config.",
+                ],
+                context={"url": url, "backend": self.backend.name},
+            )
         env = self._child_env()
 
-        max_restarts = self.config.supervisor.max_restarts
-        backoff = self.config.supervisor.backoff_base_s
+        policy = self.config.supervisor
+        max_restarts = policy.max_restarts
+        backoff = policy.backoff_base_s
         started_at = time.time()
         announced = False
+        attempt = 0   # position in the current restart budget
+        restarts = 0  # total respawns this session (what gets reported)
+        first_spawn = True
 
-        for attempt in range(max_restarts + 1):
+        while attempt <= max_restarts:
             if self._stop.is_set():
                 break
+            if not first_spawn:
+                restarts += 1
+            first_spawn = False
             self._spawn(cmd, env)
             try:
                 self._wait_ready(url, self.backend.ready_timeout_s())
+                if self._stop.is_set():
+                    break  # Ctrl+C during startup: never announce a server we're stopping
                 self._verify_generation(host, port)
             except (LaunchError, HealthCheckError) as exc:
                 self._terminate()
@@ -554,8 +632,9 @@ class Supervisor:
                         "supervisor", "restart_scheduled",
                         attempt=attempt + 1, backoff_s=backoff, reason=exc.code,
                     )
-                    time.sleep(backoff)
-                    backoff = min(backoff * 2, self.config.supervisor.backoff_max_s)
+                    self._stop.wait(backoff)
+                    backoff = min(backoff * 2, policy.backoff_max_s)
+                    attempt += 1
                     continue
                 raise RecoveryExhaustedError(
                     f"'{self.entry.id}' failed to start after {attempt + 1} attempt(s).",
@@ -574,29 +653,38 @@ class Supervisor:
                 self._announce_ready(on_ready, base, port, t0)
                 self._publish_instance(base, port, url)
                 announced = True
+            ready_at = time.monotonic()
             reason = self._monitor(url)
 
             if reason == "stop_requested":
                 self._terminate()
-                self._emit_exit(started_at, port, attempt, graceful=True)
-                return LaunchResult(base, self.backend.name, port, attempt)
+                self._emit_exit(started_at, port, restarts, graceful=True)
+                return LaunchResult(base, self.backend.name, port, restarts)
 
             # Unexpected exit.
             code = self._proc.returncode if self._proc else None
+            uptime = time.monotonic() - ready_at
             self.log.error(
                 "supervisor", "process_crash",
-                returncode=code, attempt=attempt + 1,
+                returncode=code, attempt=attempt + 1, uptime_s=round(uptime, 1),
                 context_window=self.log.context_window()[-10:],
             )
+            if uptime >= policy.stable_after_s:
+                # A crash after a long healthy run is a new incident, not the
+                # same one recurring: without this a server that crashes once a
+                # day exhausts the budget for good by day four.
+                self.log.info("supervisor", "restart_budget_reset", uptime_s=round(uptime, 1))
+                attempt, backoff = 0, policy.backoff_base_s
             if attempt < max_restarts and not self._stop.is_set():
                 self.log.warn(
                     "supervisor", "restart_scheduled",
                     attempt=attempt + 1, backoff_s=backoff, reason="crash",
                 )
-                time.sleep(backoff)
-                backoff = min(backoff * 2, self.config.supervisor.backoff_max_s)
+                self._stop.wait(backoff)
+                backoff = min(backoff * 2, policy.backoff_max_s)
+                attempt += 1
                 continue
-            self._emit_exit(started_at, port, attempt, graceful=False)
+            self._emit_exit(started_at, port, restarts, graceful=False)
             raise RecoveryExhaustedError(
                 f"'{self.entry.id}' crashed and exhausted {max_restarts} restart(s).",
                 remediation=[
@@ -607,10 +695,10 @@ class Supervisor:
                 context={"returncode": code, "attempts": attempt + 1},
             )
 
-        # Stop requested before/at start.
+        # Stop requested before/at start (or between restarts).
         self._terminate()
-        self._emit_exit(started_at, port, 0, graceful=True)
-        return LaunchResult(base, self.backend.name, port, 0)
+        self._emit_exit(started_at, port, restarts, graceful=True)
+        return LaunchResult(base, self.backend.name, port, restarts)
 
     def _emit_exit(self, started_at: float, port: int, restarts: int, *, graceful: bool) -> None:
         self.log.info(

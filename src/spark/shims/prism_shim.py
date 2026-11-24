@@ -75,9 +75,12 @@ def _load(pack: Path, model_id: str) -> None:
     tokenizer = load_tokenizer(str(pack))
 
     template_text = (pack / "chat_template.jinja").read_text(encoding="utf-8")
-    import jinja2
+    # The template is downloaded repo content: render it sandboxed (as HF
+    # transformers does for chat templates), or a hostile template gets
+    # SSTI -> code execution via `{{ cycler.__init__.__globals__ ... }}`.
+    from jinja2.sandbox import ImmutableSandboxedEnvironment
 
-    template = jinja2.Environment().from_string(template_text)
+    template = ImmutableSandboxedEnvironment().from_string(template_text)
     try:
         bos = tokenizer.bos_token
     except AttributeError:
@@ -247,11 +250,17 @@ class _Handler(BaseHTTPRequestHandler):
         if self.path != "/v1/chat/completions":
             self._send(404, {"error": f"unknown path {self.path}"})
             return
+        raw_len = self.headers.get("Content-Length") or "0"
+        if not raw_len.isdigit() or int(raw_len) > 16 * 2**20:
+            self._send(400, {"error": "missing, invalid, or oversized Content-Length"})
+            return
         try:
-            length = int(self.headers.get("Content-Length") or 0)
-            body = json.loads(self.rfile.read(length) or b"{}")
+            body = json.loads(self.rfile.read(int(raw_len)) or b"{}")
         except (ValueError, OSError):
             self._send(400, {"error": "invalid JSON body"})
+            return
+        if not isinstance(body, dict):
+            self._send(400, {"error": "body must be a JSON object"})
             return
         if body.get("stream"):
             self._send(400, {"error": "streaming is not supported by this shim"})

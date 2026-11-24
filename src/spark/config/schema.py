@@ -8,6 +8,7 @@ or an injected key in a config file is a hard error, not silent behavior.
 from __future__ import annotations
 
 import os
+import re
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -17,6 +18,39 @@ ModelFormat = Literal["mlx", "mlx-vlm", "gguf", "ollama", "safetensors", "prism"
 
 class _Strict(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=False)
+
+
+_SEG = r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}"
+#: A registered id: one safe path component (it names the registry TOML).
+MODEL_ID_RE = re.compile(rf"^{_SEG}$")
+#: Any entry id, including the ephemeral ``owner/name`` ids synthesized for
+#: unregistered hub repos. Never ``..``; at most one slash.
+ENTRY_ID_RE = re.compile(rf"^{_SEG}(/{_SEG})?$")
+
+
+def check_model_id(v: str, *, allow_owner: bool = False) -> str:
+    rx = ENTRY_ID_RE if allow_owner else MODEL_ID_RE
+    if not rx.match(v or "") or ".." in v:
+        raise ValueError(
+            f"invalid model id {v!r}: letters/digits/_/.- only, start alphanumeric, "
+            "<=128 chars, no '..'"
+        )
+    return v
+
+
+def id_file_stem(model_id: str) -> str:
+    """Filename-safe form of an entry id (``owner/name`` -> ``owner--name``, the
+    HF-cache convention), for per-model files outside the registry."""
+    return check_model_id(model_id, allow_owner=True).replace("/", "--")
+
+
+def check_override_keys(v: dict[str, str]) -> dict[str, str]:
+    """launch_overrides keys become argv flags (D9). A key that is not a
+    ``-``-prefixed flag would land as a stray positional argument."""
+    for k in v:
+        if not isinstance(k, str) or not re.fullmatch(r"--?[A-Za-z0-9][A-Za-z0-9_.-]*", k):
+            raise ValueError(f"launch override key {k!r} is not a CLI flag (expected --name)")
+    return v
 
 
 def _expand_binary(v: str) -> str:
@@ -65,9 +99,9 @@ class ServerSpec(_Strict):
     binary: str = ""
     args_template: list[str] = Field(default_factory=list)
     openai_compatible: bool = True
-    default_port: int = 8080
+    default_port: int = Field(8080, ge=1, le=65535)
     health_path: str = "/v1/models"
-    ready_timeout_s: float = 120.0
+    ready_timeout_s: float = Field(120.0, gt=0)
     # Daemon-style backends (e.g. ollama): if the endpoint is already healthy,
     # attach to it instead of spawning, and never terminate it on shutdown.
     attach_if_running: bool = False
@@ -118,7 +152,7 @@ class MemoryPolicy(_Strict):
     """Unified-memory budgeting (critical on a 16 GB Apple Silicon box)."""
 
     # Fraction of total unified memory considered safely usable for weights+kv.
-    usable_fraction: float = 0.65
+    usable_fraction: float = Field(0.65, gt=0, le=1)
     # Refuse to launch if estimated footprint exceeds usable budget unless --force.
     enforce: bool = True
     # Bytes-per-param multipliers for rough footprint estimation by quant tag.
@@ -135,32 +169,43 @@ class MemoryPolicy(_Strict):
         }
     )
     # KV-cache and runtime overhead headroom multiplier on top of weights.
-    overhead_multiplier: float = 1.20
+    overhead_multiplier: float = Field(1.20, ge=1)
 
 
 class DiskPolicy(_Strict):
     # Refuse downloads that would drop free space below this many GiB.
-    min_free_gib: float = 10.0
+    min_free_gib: float = Field(10.0, ge=0)
     enforce: bool = True
 
 
 class GeneralConfig(_Strict):
     host: str = "127.0.0.1"            # bind localhost only by default (no LAN exposure)
     port_range: tuple[int, int] = (8080, 8099)
-    log_retention_days: int = 7
+    log_retention_days: int = Field(7, ge=1)
     # Backend preference, highest priority first. Used to pick among capable
     # runtimes for a given model on this host.
     preference: list[str] = Field(
         default_factory=lambda: ["mlx_lm", "mlx_vlm", "llama_cpp", "omlx", "ollama"]
     )
 
+    @field_validator("port_range")
+    @classmethod
+    def _ports(cls, v: tuple[int, int]) -> tuple[int, int]:
+        lo, hi = v
+        if not (1 <= lo <= hi <= 65535):
+            raise ValueError(f"port_range {v} must satisfy 1 <= lo <= hi <= 65535")
+        return v
+
 
 class SupervisorPolicy(_Strict):
-    max_restarts: int = 3
-    backoff_base_s: float = 1.0
-    backoff_max_s: float = 30.0
-    health_interval_s: float = 5.0
-    shutdown_grace_s: float = 10.0
+    max_restarts: int = Field(3, ge=0)
+    backoff_base_s: float = Field(1.0, ge=0)
+    backoff_max_s: float = Field(30.0, ge=0)
+    health_interval_s: float = Field(5.0, gt=0)
+    shutdown_grace_s: float = Field(10.0, ge=0)
+    # A crash after this much healthy uptime gets a fresh restart budget (and
+    # backoff): it is a new incident, not the same failure recurring.
+    stable_after_s: float = Field(300.0, gt=0)
     # After the health endpoint answers, force one minimal generation before
     # declaring the server ready. Lazy-loading runtimes (mlx_lm/mlx_vlm) start
     # their HTTP surface *before* the model is resident, and their /v1/models
@@ -220,6 +265,11 @@ class DFlashProfile(_Strict):
     backend: str = "mlx_vlm"                                        # runtime implementing DFlash
     launch_overrides: dict[str, str] = Field(default_factory=dict)  # drafter flags (--draft-model, …)
 
+    @field_validator("launch_overrides")
+    @classmethod
+    def _keys(cls, v: dict[str, str]) -> dict[str, str]:
+        return check_override_keys(v)
+
 
 class ModelEntry(_Strict):
     """A registered model (one TOML per model under the data dir)."""
@@ -241,6 +291,16 @@ class ModelEntry(_Strict):
     notes: str = ""
     # Opt-in speculative-decoding profile; None = model has no DFlash path (--dflash errors).
     dflash: DFlashProfile | None = None
+
+    @field_validator("id")
+    @classmethod
+    def _id(cls, v: str) -> str:
+        return check_model_id(v, allow_owner=True)
+
+    @field_validator("launch_overrides")
+    @classmethod
+    def _keys(cls, v: dict[str, str]) -> dict[str, str]:
+        return check_override_keys(v)
 
     def with_dflash(self) -> "ModelEntry":
         """Copy configured for DFlash: the profile's backend, with its drafter

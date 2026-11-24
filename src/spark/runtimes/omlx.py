@@ -19,7 +19,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from ..config.paths import resolve_paths
-from ..config.schema import ModelEntry
+from ..config.schema import ModelEntry, id_file_stem
 from ..errors import RuntimeBackendError
 from ..hf_cache import snapshot_dir as _hf_cache_snapshot
 from .base import Backend, register
@@ -46,7 +46,11 @@ class OmlxBackend(Backend):
 
     def _model_dir(self, entry: ModelEntry) -> Path:
         # Private per-model dir; its single subdir (a symlink) is the served model.
-        return resolve_paths().run_dir / "omlx" / entry.id
+        return resolve_paths().run_dir / "omlx" / id_file_stem(entry.id)
+
+    def api_model_id(self, entry: ModelEntry) -> str:
+        # oMLX names each served model after its subdir — the symlink below.
+        return id_file_stem(entry.id)
 
     def resolve_model_dir(self, entry: ModelEntry) -> str:
         return str(self._model_dir(entry))
@@ -55,7 +59,7 @@ class OmlxBackend(Backend):
         src = self._source_dir(entry)
         model_dir = self._model_dir(entry)
         model_dir.mkdir(parents=True, exist_ok=True)
-        link = model_dir / entry.id  # subdir name -> oMLX model id
+        link = model_dir / self.api_model_id(entry)  # subdir name -> oMLX model id
         if link.is_symlink() or link.exists():
             link.unlink()
         link.symlink_to(src, target_is_directory=True)

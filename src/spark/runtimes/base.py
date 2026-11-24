@@ -12,7 +12,6 @@ from typing import Type
 
 from ..config.schema import ModelEntry, RuntimeDef, SparkConfig
 from ..errors import ConfigError
-from ..probe.host import RuntimeStatus
 
 
 class _SafeMap(dict):
@@ -220,6 +219,21 @@ def get_backend(name: str, config: SparkConfig) -> Backend:
     rt = config.runtimes[name]
     cls = _REGISTRY.get(name, Backend)
     return cls(rt, config)
+
+
+def entry_for_backend(entry: ModelEntry, backend_name: str) -> tuple[ModelEntry, list[str]]:
+    """The entry as it should launch on ``backend_name``.
+
+    ``launch_overrides`` are tuned (and D11-validated) for the entry's pinned
+    backend. Launching a *different* one — pinned runtime uninstalled, or an
+    explicit ``--backend`` — would hand it foreign flags, and the server dies on
+    argparse through every restart. So they are dropped, and the dropped flags
+    returned for the caller to report. Unpinned entries keep theirs.
+    """
+    if not entry.backend or entry.backend == backend_name or not entry.launch_overrides:
+        return entry, []
+    dropped = sorted(entry.launch_overrides)
+    return entry.model_copy(update={"launch_overrides": {}}), dropped
 
 
 def select_backend_for(

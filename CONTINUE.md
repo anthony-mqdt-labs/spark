@@ -4,9 +4,11 @@ Handoff for an agent resuming **unfinished** work. Completed history is not kept
 here: `git log`, `README.md`, and `../bugs/` are the record. Anything that is done
 gets deleted from this file rather than annotated. Overwrite at session end.
 
-**State, 2026-09-18.** `main` is clean, one commit ahead of origin (`f4e30bb`,
-completion policy). Nothing running; 8095 free. 173 tests pass; two pre-existing
-F401s stand in `runtimes/base.py` and `runtimes/ollama.py`.
+**State, 2026-11-23.** Hardening pass is **uncommitted** in the working tree
+(supervisor lifecycle, schema seams, proxy streaming, research tool-off, catalog
+ownership, hermes tool-off, keychain attribute-only lookup — README D14–D18; tests in `tests/test_hardening.py`). 283 tests pass;
+the two old F401s are gone. Review the diff and commit on the operator's word.
+`specs/0003-sdcpp-image-runtime/` and the `CLAUDE.md` edit predate the pass.
 
 ## Do next — concrete, unblocked
 

@@ -38,6 +38,7 @@ enforce = true
 
 [supervisor]
 max_restarts = 3
+stable_after_s = 300.0  # a crash after this much healthy uptime gets a fresh budget
 backoff_base_s = 1.0
 backoff_max_s = 30.0
 health_interval_s = 5.0
@@ -62,7 +63,9 @@ model_card_chars = 6000
 name = "claude"
 type = "cli"
 detect_binary = "claude"
-command = ["claude", "-p", "--output-format", "json"]
+# No tools, no MCP: the prompt embeds a third-party model card, so a
+# prompt-injected card must have nothing to act with. JSON out is all we need.
+command = ["claude", "-p", "--tools", "", "--strict-mcp-config", "--output-format", "json"]
 prompt_via = "stdin"
 parse = "json_envelope"
 envelope_field = "result"
@@ -75,7 +78,10 @@ timeout_s = 300.0
 name = "hermes"
 type = "cli"
 detect_binary = "hermes"
-command = ["hermes", "-z", "{prompt}"]
+# Tools off: hermes has no "none" toolset, but `-t clarify` selects only the
+# ask-the-user tool and oneshot (-z) strips that toolset, leaving zero tools —
+# verified against hermes v0.23.1's own get_tool_definitions (19 tools -> 0).
+command = ["hermes", "-t", "clarify", "-z", "{prompt}"]
 prompt_via = "arg"
 parse = "raw_json"
 timeout_s = 300.0
@@ -90,7 +96,8 @@ timeout_s = 300.0
 name = "pi"
 type = "cli"
 detect_binary = "pi"
-command = ["pi", "-p", "{prompt}"]
+# --no-tools: same injection posture as claude (the card is untrusted text).
+command = ["pi", "-p", "--no-tools", "{prompt}"]
 prompt_via = "arg"
 parse = "raw_json"
 timeout_s = 300.0

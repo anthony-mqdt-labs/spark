@@ -13,12 +13,8 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-import threading
 import urllib.request
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-
-import pytest
 
 from spark.config.schema import ModelEntry
 
@@ -173,6 +169,16 @@ class H(BaseHTTPRequestHandler):
         else:
             self._send(404, {})
     def do_POST(self):
+        if self.path == "/v1/stream":
+            import time
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            for i in range(2):
+                self.wfile.write(f"data: {i}\\n\\n".encode())
+                self.wfile.flush()
+                time.sleep(2.0)
+            return
         n = int(self.headers.get("Content-Length") or 0)
         body = self.rfile.read(n) if n else b"{}"
         self._send(200, {"echo_path": self.path, "echo": json.loads(body)})
@@ -315,3 +321,41 @@ def test_proxy_exits_and_reaps_child_when_backend_dies(tmp_path):
     finally:
         if proc.poll() is None:
             proc.kill()
+
+
+def test_proxy_streams_instead_of_buffering(tmp_path):
+    """SSE completions must reach the client chunk by chunk: a buffering proxy
+    turns time-to-first-token into total generation time for every harness."""
+    import time
+
+    proc, base, _ = _run_proxy(tmp_path, "served-model")
+    try:
+        req = urllib.request.Request(base + "/v1/stream", data=b"{}", method="POST",
+                                     headers={"Content-Type": "application/json"})
+        t0 = time.monotonic()
+        with urllib.request.urlopen(req, timeout=10) as r:
+            first = r.readline()
+            first_at = time.monotonic() - t0
+            rest = r.read()
+        assert first == b"data: 0\n"
+        assert first_at < 1.5, f"first chunk took {first_at:.1f}s — proxy is buffering"
+        assert b"data: 1" in rest
+    finally:
+        proc.terminate()
+        proc.wait(timeout=15)
+
+
+def test_proxy_rejects_bad_content_length(tmp_path):
+    import http.client
+
+    proc, base, _ = _run_proxy(tmp_path, "served-model")
+    try:
+        port = int(base.rsplit(":", 1)[1])
+        conn = http.client.HTTPConnection("127.0.0.1", port, timeout=5)
+        conn.putrequest("POST", "/v1/chat/completions")
+        conn.putheader("Content-Length", "-1")
+        conn.endheaders()
+        assert conn.getresponse().status == 400
+    finally:
+        proc.terminate()
+        proc.wait(timeout=15)

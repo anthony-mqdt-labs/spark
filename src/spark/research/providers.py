@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -74,10 +75,21 @@ class ResearchProvider(ABC):
     def research(self, request: ResearchRequest) -> ResearchOutput: ...
 
 
+def agent_env(scrub: frozenset[str]) -> dict[str, str]:
+    """spark's env minus every var that carries a vault secret to a runtime.
+
+    The agent needs its own auth (its env passes through), but a token the
+    operator exported for a runtime (``HF_TOKEN``) must not ride along into an
+    LLM-driven process — the same rule the prompt guard enforces on the text.
+    """
+    return {k: v for k, v in os.environ.items() if k not in scrub}
+
+
 class CliAgentProvider(ResearchProvider):
-    def __init__(self, defn: ResearchProviderDef) -> None:
+    def __init__(self, defn: ResearchProviderDef, scrub_env: frozenset[str] = frozenset()) -> None:
         self.defn = defn
         self.name = defn.name
+        self.scrub_env = scrub_env | {"HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"}
 
     def is_available(self) -> bool:
         if not self.defn.enabled:
@@ -101,6 +113,7 @@ class CliAgentProvider(ResearchProvider):
             proc = subprocess.run(
                 cmd, input=stdin_data, capture_output=True, text=True,
                 timeout=self.defn.timeout_s, check=False,
+                env=agent_env(self.scrub_env),
             )
         except (OSError, subprocess.SubprocessError) as exc:
             raise SparkError(f"{self.name}: failed to run ({exc})", code="NET_RESEARCH") from exc
@@ -134,4 +147,7 @@ class CliAgentProvider(ResearchProvider):
 
 
 def build_providers(config: SparkConfig) -> list[ResearchProvider]:
-    return [CliAgentProvider(d) for d in config.research.providers]
+    scrub = frozenset(
+        var for rt in config.runtimes.values() for var in rt.server.secret_env
+    )
+    return [CliAgentProvider(d, scrub) for d in config.research.providers]

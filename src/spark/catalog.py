@@ -40,7 +40,7 @@ from pathlib import Path
 from typing import Any
 
 from .config.paths import SparkPaths
-from .config.schema import ModelEntry, SparkConfig
+from .config.schema import ModelEntry, SparkConfig, id_file_stem
 from .registry.availability import availability_map
 
 SCHEMA_VERSION = 1
@@ -128,17 +128,39 @@ def publish_instance(paths: SparkPaths, record: dict[str, Any]) -> Path:
         os.chmod(d, 0o700)
     except OSError:
         pass
-    return _atomic_write_json(d / f"{alias}.json", record)
+    return _atomic_write_json(d / f"{id_file_stem(alias)}.json", record)
 
 
-def remove_instance(paths: SparkPaths, alias: str) -> None:
-    """Delete an instance manifest (server stopped). Missing is fine."""
+def remove_instance(paths: SparkPaths, alias: str, *, owner_pid: int | None = None) -> None:
+    """Delete an instance manifest (server stopped). Missing is fine.
+
+    With ``owner_pid``, only a record that process wrote is removed: a second
+    spark serving the same alias overwrites the record, and the first one's
+    exit must not then delete the survivor's endpoint.
+    """
+    p = instances_dir(paths) / f"{id_file_stem(alias)}.json"
     try:
-        (instances_dir(paths) / f"{alias}.json").unlink()
-    except FileNotFoundError:
+        if owner_pid is not None:
+            rec = json.loads(p.read_text(encoding="utf-8"))
+            if isinstance(rec, dict) and rec.get("pid") != owner_pid:
+                return
+        p.unlink()
+    except (OSError, ValueError):
         return
+
+
+def _pid_alive(pid: object) -> bool:
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # exists, owned by someone else
     except OSError:
-        return
+        return False
+    return True
 
 
 def _readable(p: Path) -> bool:
@@ -171,8 +193,13 @@ def read_instances(paths: SparkPaths) -> list[dict[str, Any]]:
             rec = json.loads(f.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if isinstance(rec, dict) and rec.get("schema_version") == SCHEMA_VERSION:
-            out.append(rec)
+        if not (isinstance(rec, dict) and rec.get("schema_version") == SCHEMA_VERSION):
+            continue
+        if not _pid_alive(rec.get("pid")):
+            # Left by a spark that was SIGKILLed (the one exit that skips
+            # cleanup). Publishing it would advertise a dead endpoint.
+            continue
+        out.append(rec)
     return out
 
 
@@ -321,4 +348,4 @@ class InstancePublisher:
         self.publish()
 
     def remove(self) -> None:
-        remove_instance(self.paths, self.alias)
+        remove_instance(self.paths, self.alias, owner_pid=os.getpid())

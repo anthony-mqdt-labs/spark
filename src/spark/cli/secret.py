@@ -28,9 +28,12 @@ def secret_set(name: str, from_stdin: bool):
     """Store/overwrite a secret. Value is never taken from argv."""
     ctx = build_context()
     if from_stdin:
-        value = sys.stdin.readline().rstrip("\n")
+        value = sys.stdin.readline()
     else:
         value = getpass.getpass(f"value for '{name}' (input hidden): ")
+    # Tokens never carry edge whitespace; a pasted trailing space or \r would be
+    # stored verbatim and surface later as an unexplained 401.
+    value = value.strip()
     if not value:
         raise SecretError(
             "No value provided.",

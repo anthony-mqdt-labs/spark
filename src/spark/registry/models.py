@@ -7,28 +7,27 @@ tiny in-house emitter to avoid a TOML *writer* dependency.
 
 from __future__ import annotations
 
-import re
 import tomllib
 from pathlib import Path
 
 from ..config.paths import SparkPaths, resolve_paths
-from ..config.schema import ModelEntry
+from ..config.schema import ModelEntry, check_model_id
 from ..errors import AmbiguousModelError, ModelError, ModelNotFoundError
 
-_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 
-
-def _validate_id(model_id: str) -> str:
-    if not _ID_RE.match(model_id or ""):
+def validate_id(model_id: str) -> str:
+    """A registry id, or ModelError with the rule (ids name files)."""
+    try:
+        return check_model_id(model_id)
+    except ValueError as exc:
         raise ModelError(
             f"Invalid model id {model_id!r}.",
-            remediation=["Use letters/digits/_/.- (start alphanumeric, <=128 chars)."],
-        )
-    return model_id
+            remediation=["Use letters/digits/_/.- (start alphanumeric, <=128 chars, no '..')."],
+        ) from exc
 
 
 def _entry_path(paths: SparkPaths, model_id: str) -> Path:
-    return paths.models_dir / f"{model_id}.toml"
+    return paths.models_dir / f"{validate_id(model_id)}.toml"
 
 
 # --- TOML emit (minimal, typed) ------------------------------------------------
@@ -80,7 +79,7 @@ def _dump_entry(entry: ModelEntry) -> str:
 # --- CRUD ----------------------------------------------------------------------
 def save_model(entry: ModelEntry, paths: SparkPaths | None = None) -> Path:
     paths = paths or resolve_paths()
-    _validate_id(entry.id)
+    validate_id(entry.id)
     paths.models_dir.mkdir(parents=True, exist_ok=True)
     path = _entry_path(paths, entry.id)
     tmp = path.with_suffix(".tmp")
@@ -104,9 +103,26 @@ def list_models(paths: SparkPaths | None = None) -> list[ModelEntry]:
     out: list[ModelEntry] = []
     for f in sorted(paths.models_dir.glob("*.toml")):
         try:
-            out.append(load_model_file(f))
-        except Exception:
-            continue  # skip malformed entries rather than failing the listing
+            entry = load_model_file(f)
+        except Exception as exc:  # noqa: BLE001
+            # Skip rather than fail the listing — but say so, or a hand-edit
+            # typo makes a model silently vanish from every command.
+            from ..telemetry import get_telemetry
+
+            get_telemetry().warn(
+                "registry", "entry_unreadable", file=f.name,
+                error_type=type(exc).__name__, message=str(exc)[:256],
+            )
+            continue
+        if entry.id != f.stem:
+            # Kept (hiding a model is worse), but flagged: forget/save address
+            # the file by id, so this entry cannot be dropped by its own name.
+            from ..telemetry import get_telemetry
+
+            get_telemetry().warn(
+                "registry", "entry_id_mismatch", file=f.name, model_id=entry.id,
+            )
+        out.append(entry)
     return out
 
 

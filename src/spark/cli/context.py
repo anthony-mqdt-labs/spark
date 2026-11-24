@@ -33,6 +33,9 @@ def build_context() -> SparkCtx:
         echo_errors=bool(os.environ.get("SPARK_DEBUG")),
     )
     config = load_config(paths)
+    # Telemetry starts before config so a config failure is still logged; the
+    # configured retention applies from the first prune (which is lazy).
+    telemetry.retention_days = config.general.log_retention_days
     telemetry.info(
         "cli", "session_start",
         version=_version(), argv_count=len(os.sys.argv),

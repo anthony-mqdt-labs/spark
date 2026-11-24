@@ -6,7 +6,6 @@ is pulled before use. The OpenAI-compatible endpoint is at ``:11434/v1``."""
 
 from __future__ import annotations
 
-import json
 import subprocess
 import urllib.request
 
@@ -19,8 +18,13 @@ from .base import Backend, register
 @register("ollama")
 class OllamaBackend(Backend):
     def _tag(self, entry: ModelEntry) -> str:
-        # Ollama addresses models by tag (e.g. 'llama3.1:8b').
-        return entry.launch_overrides.get("ollama_tag") or entry.path or entry.id
+        # Ollama addresses models by tag (e.g. 'llama3.1:8b'), carried in
+        # `path` (ollama owns its store, so there is no filesystem path).
+        return entry.path or entry.id
+
+    def resolve_model_ref(self, entry: ModelEntry) -> str:
+        # The tag is both what gets pulled and what a client must send.
+        return self._tag(entry)
 
     def _daemon_healthy(self, host: str, port: int) -> bool:
         try:

@@ -24,7 +24,17 @@ mutates it.
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
+
+#: HF repo id: ``name`` or ``owner/name``; alnum first, then ``[\w.-]``. This is
+#: what keeps a user-typed repo from becoming an ``hf`` option (``-x``), an API
+#: URL query (``a?b``), or a path escape (``..``) in the cache/store.
+REPO_ID_RE = re.compile(r"^[A-Za-z0-9][\w.-]{0,95}(/[A-Za-z0-9][\w.-]{0,95})?$")
+
+
+def is_valid_repo_id(repo: str) -> bool:
+    return bool(REPO_ID_RE.match(repo or "")) and ".." not in repo
 
 
 def hf_cache_root() -> Path:

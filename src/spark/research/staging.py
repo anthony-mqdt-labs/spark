@@ -7,12 +7,12 @@ import time
 from pathlib import Path
 
 from ..config.paths import SparkPaths
-from ..config.schema import ModelEntry
+from ..config.schema import ModelEntry, check_model_id
 from .types import ResearchOutput
 
 
 def _staging_path(paths: SparkPaths, model_id: str) -> Path:
-    return paths.staging_dir / f"{model_id}.json"
+    return paths.staging_dir / f"{check_model_id(model_id)}.json"
 
 
 def stage(
@@ -42,9 +42,14 @@ def load_staged(paths: SparkPaths, model_id: str) -> dict | None:
     if not path.exists():
         return None
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        return None
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        doc = None
+    if not isinstance(doc, dict):
+        # Present but unreadable: still surface it, so `--reject` can discard
+        # it and `--accept` fails with a schema error instead of "nothing staged".
+        return {"provider": "(unreadable staging file)", "output": None}
+    return doc
 
 
 def delete_staged(paths: SparkPaths, model_id: str) -> None:

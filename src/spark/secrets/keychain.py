@@ -117,6 +117,7 @@ class KeychainStore(SecretStore):
                 remediation=["Provide a non-empty value via getpass/stdin."],
             )
         lib = self._require()
+        self._register_for_redaction(value)  # masked from this moment, not first read
         acct = name.encode("utf-8")
         data = value.encode("utf-8")
 
@@ -172,25 +173,33 @@ class KeychainStore(SecretStore):
         # Backstop: register so telemetry can never accidentally log it.
         return self._register_for_redaction(value)
 
-    def _delete_raw(self, name: str) -> bool:
+    def _find_item(self, name: str) -> tuple[int, c_void_p]:
+        """Locate the item by attributes only (NULL length/data pointers).
+
+        Never fetches the value: an existence check must not pull secret
+        material into memory, and fetching data is what triggers the Keychain
+        ACL "allow access" dialog — which blocks a non-interactive launch
+        (resolve_env -> exists) indefinitely. Verified on a throwaway keychain:
+        attribute-only lookup returns 0 / -25300 with no prompt.
+        """
         lib = self._require()
         acct = name.encode("utf-8")
-        length = c_uint32(0)
-        data_ptr = c_void_p()
         item_ref = c_void_p()
         status = lib.SecKeychainFindGenericPassword(
             None,
             len(self._service), self._service,
             len(acct), acct,
-            byref(length), byref(data_ptr), byref(item_ref),
+            None, None, byref(item_ref),
         )
+        return status, item_ref
+
+    def _delete_raw(self, name: str) -> bool:
+        status, item_ref = self._find_item(name)
         if status == _ERR_SEC_ITEM_NOT_FOUND:
             return False
         if status != _ERR_SEC_SUCCESS:
             self._raise_status(status, name, "delete-find")
-        # Free the data buffer we don't need; keep item_ref for deletion.
-        lib.SecKeychainItemFreeContent(None, data_ptr)
-        del_status = lib.SecKeychainItemDelete(item_ref)
+        del_status = self._require().SecKeychainItemDelete(item_ref)
         if del_status != _ERR_SEC_SUCCESS:
             self._raise_status(del_status, name, "delete")
         return True
@@ -202,19 +211,8 @@ class KeychainStore(SecretStore):
 
     def exists(self, name: str) -> bool:
         validate_name(name)
-        lib = self._require()
-        acct = name.encode("utf-8")
-        length = c_uint32(0)
-        data_ptr = c_void_p()
-        item_ref = c_void_p()
-        status = lib.SecKeychainFindGenericPassword(
-            None,
-            len(self._service), self._service,
-            len(acct), acct,
-            byref(length), byref(data_ptr), byref(item_ref),
-        )
+        status, _ = self._find_item(name)
         if status == _ERR_SEC_SUCCESS:
-            lib.SecKeychainItemFreeContent(None, data_ptr)
             return True
         if status == _ERR_SEC_ITEM_NOT_FOUND:
             return False

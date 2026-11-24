@@ -7,7 +7,7 @@ import click
 from ..errors import SparkError
 from ..probe.host import load_or_probe
 from ..runner import Supervisor
-from ..runtimes import get_backend, select_backend_for
+from ..runtimes import entry_for_backend, get_backend, select_backend_for
 from .context import build_context
 from .render import console, render_server_log
 
@@ -19,7 +19,9 @@ from .render import console, render_server_log
 @click.option("--dflash", is_flag=True,
               help="Enable the model's DFlash speculative-decoding profile (opt-in; "
                    "needs a [dflash] section in the model's registry entry).")
-@click.option("--force", is_flag=True, help="Bypass memory/disk budget gates.")
+@click.option("--force", is_flag=True,
+              help="Bypass the memory gate, the missing-weights refusal, and the "
+                   "already-serving refusal (the fetch disk floor still applies).")
 @click.option("--reprobe", is_flag=True, help="Re-probe host before launching.")
 def run_command(model: str, backend_override: str | None, dflash: bool,
                 force: bool, reprobe: bool):
@@ -85,9 +87,23 @@ def run_command(model: str, backend_override: str | None, dflash: bool,
             remediation=[f"Available: {', '.join(available)}"],
         )
 
+    if entry.backend and backend_name != entry.backend:
+        why = "forced with --backend" if backend_override else f"'{entry.backend}' is not available"
+        console.print(
+            f"[yellow]![/yellow] [dim]{entry.id} is pinned to {entry.backend}; "
+            f"launching {backend_name} ({why})[/dim]"
+        )
+    entry, dropped = entry_for_backend(entry, backend_name)
+    if dropped:
+        console.print(
+            f"[yellow]![/yellow] [dim]dropped {entry.backend}-tuned flags "
+            f"{', '.join(dropped)} (not validated for {backend_name})[/dim]"
+        )
+
     backend = get_backend(backend_name, ctx.config)
     ctx.telemetry.info(
         "cli", "run_dispatch", model=entry.id, backend=backend_name, dflash=dflash,
+        pinned_backend=entry.backend, dropped_overrides=dropped,
     )
 
     label = backend_name + (" · dflash" if dflash else "")

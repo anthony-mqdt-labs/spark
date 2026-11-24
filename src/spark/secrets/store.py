@@ -17,7 +17,7 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 
-from ..telemetry import register_secret_value
+from ..telemetry import get_telemetry, register_secret_value
 
 # Secret names are constrained to a safe charset so they can never be used to
 # inject arguments into the backend CLI.
@@ -86,8 +86,14 @@ class SecretStore(ABC):
             try:
                 if self.exists(secret_name):
                     out[env_var] = self.get(secret_name)
-            except Exception:
-                # Never let a secret-resolution hiccup crash a launch silently in
-                # a way that leaks; just skip and let the runtime report auth need.
+            except Exception as exc:  # noqa: BLE001
+                # Skip rather than crash the launch (the runtime will report its
+                # auth need) — but leave a trace naming the var, never the value,
+                # or a gated 401 three layers down is undiagnosable.
+                get_telemetry().warn(
+                    "secrets", "secret_resolve_failed",
+                    env_var=env_var, vault_entry=secret_name,
+                    error_type=type(exc).__name__, backend=self.backend_name,
+                )
                 continue
         return out

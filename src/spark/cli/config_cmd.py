@@ -56,6 +56,8 @@ def config_review(model: str, accept: bool, reject: bool):
     from ..research.types import ResearchOutput
     from .context import build_context, refresh_catalog
 
+    if accept and reject:
+        raise click.UsageError("--accept and --reject are mutually exclusive.")
     ctx = build_context()
     entry = resolve_model(model, ctx.paths)
     staged = load_staged(ctx.paths, entry.id)
@@ -73,7 +75,21 @@ def config_review(model: str, accept: bool, reject: bool):
         console.print("[yellow]rejected and discarded[/yellow]")
         return
     if accept:
-        output = ResearchOutput.model_validate(staged["output"])
+        try:
+            output = ResearchOutput.model_validate(staged.get("output"))
+        except Exception as exc:  # pydantic ValidationError
+            from ..errors import ConfigError
+
+            raise ConfigError(
+                f"Staged research for '{entry.id}' does not match the research schema.",
+                code="CFG_RESEARCH_SCHEMA",
+                remediation=[
+                    f"Discard it: spark config review {entry.id} --reject",
+                    f"Then re-run: spark research {entry.id}",
+                ],
+                context={"model": entry.id},
+                cause=exc,
+            ) from exc
         from ..research.validate import validate_accept
 
         candidate, errors, warnings = validate_accept(entry, output, ctx.config)

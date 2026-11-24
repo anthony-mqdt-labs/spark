@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from collections import deque
 from datetime import datetime, timezone
@@ -67,9 +68,25 @@ def _scrub_string(s: str) -> str:
     return s
 
 
+# "token" as a credential (hf_token, access_token) — not a count or a tokenizer
+# (prompt_tokens, completion_tokens, tokenizer_path), which the inference-event
+# logging contract requires in the clear.
+_TOKEN_NOT_CREDENTIAL = re.compile(r"token(?:s|iz)")
+
+# Envelope fields every record carries; a payload key must never overwrite them
+# (pid= the child's pid would silently replace the emitter's own).
+_RESERVED = frozenset(("ts", "level", "component", "event", "session_id", "pid"))
+
+
 def _is_sensitive_key(key: str) -> bool:
     k = key.lower()
-    return any(hint in k for hint in _SENSITIVE_KEY_HINTS)
+    for hint in _SENSITIVE_KEY_HINTS:
+        if hint == "token":
+            if "token" in _TOKEN_NOT_CREDENTIAL.sub("", k):
+                return True
+        elif hint in k:
+            return True
+    return False
 
 
 def _redact(obj: Any, *, key: str | None = None) -> Any:
@@ -113,23 +130,23 @@ class Telemetry:
         self._echo_errors = echo_errors
 
     # -- public level helpers ---------------------------------------------------
-    def debug(self, component: str, event: str, **payload: Any) -> None:
+    def debug(self, component: str, event: str, /, **payload: Any) -> None:
         self.emit("debug", component, event, **payload)
 
-    def info(self, component: str, event: str, **payload: Any) -> None:
+    def info(self, component: str, event: str, /, **payload: Any) -> None:
         self.emit("info", component, event, **payload)
 
-    def warn(self, component: str, event: str, **payload: Any) -> None:
+    def warn(self, component: str, event: str, /, **payload: Any) -> None:
         self.emit("warn", component, event, **payload)
 
-    def error(self, component: str, event: str, **payload: Any) -> None:
+    def error(self, component: str, event: str, /, **payload: Any) -> None:
         self.emit("error", component, event, **payload)
 
-    def critical(self, component: str, event: str, **payload: Any) -> None:
+    def critical(self, component: str, event: str, /, **payload: Any) -> None:
         self.emit("critical", component, event, **payload)
 
     # -- core -------------------------------------------------------------------
-    def emit(self, level: str, component: str, event: str, **payload: Any) -> None:
+    def emit(self, level: str, component: str, event: str, /, **payload: Any) -> None:
         if level not in REQUIRED_LEVELS:
             level = "info"
         record: dict[str, Any] = {
@@ -141,7 +158,8 @@ class Telemetry:
             "pid": self.pid,
         }
         if payload:
-            record.update(_redact(payload))
+            for k, v in _redact(payload).items():
+                record[f"payload_{k}" if k in _RESERVED else k] = v
 
         self._ring.append(record)
         line = json.dumps(record, ensure_ascii=False, default=str)

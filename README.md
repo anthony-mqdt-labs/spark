@@ -606,6 +606,9 @@ twice). Both are unacceptable under the threat model. The deprecated `SecKeychai
 C API via ctypes keeps the value in process memory with **zero new dependencies**.
 Rejected alternatives: the `keyring` PyPI package (extra deps), an age/sops
 encrypted file (still a file on disk; key management problem).
+Presence checks (`exists`, delete's lookup) are attribute-only (NULL data
+pointers): fetching the value is what raises the Keychain "allow access" dialog,
+which would block a non-interactive `spark run` just to learn a token exists.
 
 ### D3. venv pinned to Python 3.12 (system is 3.14)
 spark's deps are pure-Python and run on 3.14, but the venv pins 3.12 for a stable,
@@ -684,7 +687,56 @@ spawns the real server as its child on an ephemeral port, filters only
 `GET /v1/models` (served id + registered ∩ present mlx-servable ids), and exits
 when the backend dies so the supervisor restarts the unit — child reaped first,
 never orphaned. Opt-in per backend (`[server] filter_models`, default off);
-generation is never gated, only the listing.
+generation is never gated, only the listing. The proxy **streams** (it never
+buffers a response: `stream: true` is SSE, and buffering turns time-to-first-token
+into total time) and binds its port before the backend loads, answering 503 until
+it is healthy.
+
+### D14. Ids are path components; one rule, enforced at the schema
+A model id names four files (registry TOML, staging JSON, instance manifest,
+server log), so `ModelEntry.id` is validated in the schema: `[A-Za-z0-9][\w.-]*`,
+no `..`. Registry ids are one component. Ephemeral ids for unregistered hub
+repos may be `owner/name`, and `id_file_stem()` maps them to `owner--name` (the
+HF-cache convention) wherever they become a filename. `launch_overrides` keys
+must be `-`-prefixed flags (D9 appends them to argv), and the accept-time check
+enforces that even when the `--help` probe cannot run. HF repo ids are validated
+before they reach `hf download` argv or the HF API URL (a leading `-` would
+otherwise be read as an `hf` option).
+
+### D15. Tuned flags belong to their backend
+`launch_overrides` are researched and validated for the entry's pinned backend.
+Launching a different one (pinned runtime uninstalled, or `--backend`) drops
+them with a printed note instead of handing foreign flags to a server that
+would die on argparse through every restart (`entry_for_backend`).
+`spark download` of an already-registered repo keeps the tuned entry, and a
+different repo whose slug collides with an existing id is refused.
+
+### D16. One live server per alias
+Instance records are keyed by alias, and a second server for the same model
+doubles resident memory on a 16 GB box. So preflight refuses a launch when a live
+record (pid alive) exists for the alias, and names the endpoint already serving.
+`--force` overrides, and the heartbeat then re-asserts the survivor's record.
+Records from a SIGKILLed spark (dead pid) are not published, and a spark removes
+only a record it wrote itself.
+
+### D17. Research agents run without tools
+The research prompt embeds a third-party model card, which is untrusted text.
+`claude` runs with `--tools "" --strict-mcp-config`, `pi` with `--no-tools`, and
+`hermes` with `-t clarify` (its only tool is ask-the-user, which oneshot `-z`
+mode strips, leaving zero tools; checked against hermes v0.23.1's own tool
+resolver). A prompt-injected card has nothing to act with. The prompt fences the card as data.
+The agent subprocess env drops every var that carries a vault secret to a runtime
+(`HF_TOKEN` …), matching what the prompt guard enforces on the text. The prism shim renders the snapshot's `chat_template.jinja` in
+jinja2's `ImmutableSandboxedEnvironment` (as HF transformers does). A plain
+`Environment` gives a hostile repo SSTI, i.e. code execution.
+
+### D18. Restart budget is per incident
+`max_restarts` bounds one incident, not the session: a crash after
+`supervisor.stable_after_s` (300 s) of healthy uptime gets a fresh budget and
+backoff. Without that reset, a server that crashes once a day is permanently out
+of restarts by day four. `restarts` in the exit event is the session total. Any exit
+path out of `Supervisor.run`, including an unanticipated exception, terminates
+the child (no orphaned server holding port and RAM).
 
 ---
 
@@ -694,12 +746,19 @@ generation is never gated, only the listing.
 `code`, a `remediation` list, and non-secret `context`. The CLI renders them as
 `{what / why / do-this-next}` (`render.py:render_error`) instead of a traceback.
 Add new failure modes as typed errors with remediation — don't raise bare
-exceptions across module boundaries.
+exceptions across module boundaries. Anything untyped that still escapes is
+caught in `main()`: logged as `unexpected_error` (type, message, file, line,
+`context_window`), rendered as `SPARK_INTERNAL`, exit 70. `SPARK_DEBUG=1` adds the
+traceback.
 
 **Logging** (`telemetry/jsonl.py`) implements the repo-wide mandatory contract:
 JSONL to `logs/<component>/<YYYY-MM-DD>.jsonl`, one object per line, with required
-fields `ts, level, component, event, session_id, pid`; daily rotation; 7-day
-retention; secret redaction; a ring buffer of recent events attached as
+fields `ts, level, component, event, session_id, pid`. A payload key that
+collides with one of these is renamed `payload_<key>` rather than overwriting it
+(the child's pid is logged as `child_pid`). Daily rotation; retention from
+`general.log_retention_days` (default 7). Secret redaction masks sensitive key
+names (`hf_token`, `api_key` …, but not counts like `prompt_tokens`) and every
+literal vault value; a ring buffer of recent events attached as
 `context_window` on crash events. Logging must never crash the program (IO errors
 are swallowed). A well-logged failure should be diagnosable from the file alone —
 e.g. supervisor logs `weights_check` (availability state + location),

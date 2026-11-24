@@ -257,9 +257,36 @@ def download_command(
     repo: str, model_id: str | None, no_fetch: bool, no_research: bool, force: bool
 ):
     """Download REPO (a Hugging Face repo id) and register it."""
+    from ..hf_cache import is_valid_repo_id
+    from ..registry import list_models
+
+    repo = repo.strip().strip("/")
+    if not is_valid_repo_id(repo):
+        raise SparkError(
+            f"{repo!r} is not a Hugging Face repo id.",
+            code="MODEL_BAD_REPO",
+            remediation=["Use the form owner/name, e.g. mlx-community/Qwen3-4B-4bit."],
+        )
     ctx = build_context()
     mid = model_id or _slug(repo)
+    from ..registry.models import validate_id
+
+    validate_id(mid)  # before it is joined into the store path below
     inferred = _infer(repo)
+    existing = next((m for m in list_models(ctx.paths) if m.id == mid), None)
+    if existing is not None and existing.hf_repo and existing.hf_repo != repo:
+        # Two repos with the same tail slug: overwriting would silently re-point
+        # the old id (and its tuned flags) at different weights.
+        from ..errors import AlreadyRegisteredError
+
+        raise AlreadyRegisteredError(
+            f"Id '{mid}' is already registered for {existing.hf_repo}.",
+            remediation=[
+                f"Pick another id: spark download {repo} --id <new-id>",
+                f"Or drop the old one first: spark forget {mid}",
+            ],
+            context={"model": mid, "registered_repo": existing.hf_repo, "repo": repo},
+        )
 
     path = ""
     if not no_fetch:
@@ -284,19 +311,29 @@ def download_command(
         _run_fetch(ctx, hf, repo, mid, dest, env)
         path = str(dest)
 
-    entry = ModelEntry(
-        id=mid,
-        hf_repo=repo,
-        path=path,
-        model_format=inferred["model_format"],
-        quant=inferred["quant"],
-        params_billions=inferred["params_billions"],
-        # Recorded so the launch path can price a re-fetch after the weights are
-        # reclaimed: the disk gate needs a real number when nothing is on disk,
-        # and the HF API is not consulted at launch time.
-        size_bytes=_dir_bytes(Path(path)) if path else None,
-        research_status="pending",
-    )
+    # Recorded so the launch path can price a re-fetch after the weights are
+    # reclaimed: the disk gate needs a real number when nothing is on disk,
+    # and the HF API is not consulted at launch time.
+    size = _dir_bytes(Path(path)) if path else None
+    if existing is not None:
+        # Re-download of the same repo (a re-fetch after reclaiming disk): keep
+        # the tuned backend/flags/research; refresh only what the fetch changed.
+        entry = existing.model_copy(update={
+            "hf_repo": repo,
+            "path": path or existing.path,
+            "size_bytes": size or existing.size_bytes,
+        })
+    else:
+        entry = ModelEntry(
+            id=mid,
+            hf_repo=repo,
+            path=path,
+            model_format=inferred["model_format"],
+            quant=inferred["quant"],
+            params_billions=inferred["params_billions"],
+            size_bytes=size,
+            research_status="pending",
+        )
     save_model(entry, ctx.paths)
     ctx.telemetry.info("download", "registered", model_id=mid, fetched=not no_fetch)
     refresh_catalog(ctx, model_id=mid)
@@ -305,6 +342,9 @@ def download_command(
 
     # Research: run the agent chain (unless opted out / disabled). Failure here is
     # non-fatal — the model is already registered and runnable.
+    if existing is not None and existing.research_status in ("registered", "manual"):
+        console.print(f"[dim]kept existing tuned config[/dim] — re-tune: spark research {mid}")
+        return
     if no_research or not ctx.config.research.enabled:
         console.print(f"[dim]research skipped[/dim] — run later: spark research {mid}")
         return

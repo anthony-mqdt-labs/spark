@@ -43,9 +43,9 @@ class SparkGroup(click.Group):
               help="Show missing entries and non-servable cache in full.")
 def list_command(show_all: bool):
     """List what this host can actually serve (disk truth, registry or not)."""
-    from ..catalog import write_catalog
     from ..inventory import build_inventory
     from ..registry.store import scan_store
+    from .context import refresh_catalog
     from .render import (
         render_inventory_notes,
         render_store_issues,
@@ -61,7 +61,7 @@ def list_command(show_all: bool):
     render_inventory_notes(inv, verbose=show_all)
     render_store_issues(scan_store(ctx.paths))
     # Keep the published roster in step with what the operator just looked at.
-    write_catalog(ctx.paths, ctx.config)
+    refresh_catalog(ctx)
 
 
 @click.command(name="catalog")
@@ -364,12 +364,19 @@ def adopt_command(repo: str, model_id: str | None, backend: str):
     """
     import re
 
-    from ..catalog import write_catalog
     from ..config.schema import ModelEntry
+    from ..errors import AlreadyRegisteredError, ConfigError
     from ..inventory import build_inventory
-    from ..registry import save_model
+    from ..registry import list_models, save_model
+    from .context import refresh_catalog
 
     ctx = build_context()
+    if backend and backend not in ctx.config.runtimes:
+        raise ConfigError(
+            f"Unknown backend '{backend}'.",
+            code="CFG_NOT_FOUND",
+            remediation=[f"Known runtimes: {', '.join(sorted(ctx.config.runtimes))}"],
+        )
     inv = build_inventory(ctx.paths, ctx.config, with_bytes=False)
     target = repo.strip()
     tl = target.lower()
@@ -401,6 +408,13 @@ def adopt_command(repo: str, model_id: str | None, backend: str):
     if found is None:
         raise _adopt_miss_error(repo, inv, ctx)
     slug = model_id or re.sub(r"[^A-Za-z0-9_.-]+", "-", found.display_id.split("/")[-1]).strip("-").lower()
+    clash = next((m for m in list_models(ctx.paths) if m.id == slug), None)
+    if clash is not None:
+        raise AlreadyRegisteredError(
+            f"Id '{slug}' is already registered ({clash.hf_repo or clash.path}).",
+            remediation=[f"Pick another id: spark adopt {repo} --id <new-id>"],
+            context={"model": slug},
+        )
     entry = ModelEntry(
         id=slug,
         hf_repo=found.repo,
@@ -412,7 +426,7 @@ def adopt_command(repo: str, model_id: str | None, backend: str):
     )
     save_model(entry, ctx.paths)
     ctx.telemetry.info("registry", "adopted", model_id=slug, source=found.source)
-    write_catalog(ctx.paths, ctx.config)
+    refresh_catalog(ctx, model_id=slug)
     console.print(f"[green]✓[/green] adopted [cyan]{found.display_id}[/cyan] as [cyan]{slug}[/cyan]")
     console.print(f"  [dim]research next: spark research {slug}[/dim]")
 
@@ -426,8 +440,8 @@ def forget_command(model: str):
     keeps being listed, and would keep being a broken `spark run` target, until
     someone drops it. This drops it — and nothing else.
     """
-    from ..catalog import write_catalog
     from ..registry import delete_model, resolve_model
+    from .context import refresh_catalog
     from ..registry.availability import requires_weights_for, resolve_availability
 
     ctx = build_context()
@@ -444,7 +458,7 @@ def forget_command(model: str):
         "registry", "forgotten",
         model_id=entry.id, state=avail.state, location=avail.location,
     )
-    write_catalog(ctx.paths, ctx.config)
+    refresh_catalog(ctx, model_id=entry.id)
     console.print(f"[green]✓[/green] forgot [cyan]{entry.id}[/cyan] (registry entry removed)")
     if avail.state == "local" and avail.location:
         console.print(
@@ -503,6 +517,40 @@ def main() -> None:
     except KeyboardInterrupt:
         console.print("\n[yellow]interrupted[/yellow]")
         sys.exit(130)
+    except Exception as exc:  # noqa: BLE001 - last line: never a bare traceback
+        _render_unexpected(exc)
+        sys.exit(70)  # EX_SOFTWARE
+
+
+def _render_unexpected(exc: Exception) -> None:
+    """An exception spark did not type is a spark bug — still leave
+    {what, why, do-this-next} and a log record a post-hoc diagnosis can use."""
+    import os
+    import traceback
+
+    tb = traceback.extract_tb(exc.__traceback__)
+    where = tb[-1] if tb else None
+    try:
+        from ..telemetry import get_telemetry
+
+        get_telemetry().critical(
+            "cli", "unexpected_error",
+            error_type=type(exc).__name__, message=str(exc)[:512],
+            file=where.filename if where else "", line=where.lineno if where else 0,
+            context_window=get_telemetry().context_window()[-10:],
+        )
+    except Exception:  # noqa: BLE001
+        pass
+    if os.environ.get("SPARK_DEBUG"):
+        traceback.print_exception(exc)
+    render_error(SparkError(
+        f"Unexpected internal error: {type(exc).__name__}: {str(exc)[:200]}",
+        code="SPARK_INTERNAL",
+        remediation=[
+            "Re-run with SPARK_DEBUG=1 for the full traceback.",
+            "The failure is logged as `unexpected_error` under the data dir's logs/cli/.",
+        ],
+    ))
 
 
 if __name__ == "__main__":

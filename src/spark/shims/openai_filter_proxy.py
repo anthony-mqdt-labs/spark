@@ -45,6 +45,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 # Formats mlx_lm.server can plausibly serve (mirrors backend selection).
 SERVABLE_FORMATS = ("mlx", "any", "")
 
+#: Request bodies are chat payloads; anything near this is a misbehaving client.
+MAX_BODY_BYTES = 64 * 2**20
+
 _HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
     "te", "trailer", "transfer-encoding", "upgrade",
@@ -141,27 +144,45 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(503, {"error": "backend not ready"})
             return
         # Passthrough: same method/path/body, hop headers stripped.
-        length = int(self.headers.get("Content-Length") or 0)
+        raw_len = self.headers.get("Content-Length") or "0"
+        if not raw_len.isdigit() or int(raw_len) > MAX_BODY_BYTES:
+            self._send_json(400, {"error": "missing, invalid, or oversized Content-Length"})
+            return
+        length = int(raw_len)
+        if not length and "chunked" in (self.headers.get("Transfer-Encoding") or "").lower():
+            # Forwarding would silently drop the body; refuse loudly instead.
+            self._send_json(411, {"error": "chunked request bodies are not supported"})
+            return
         body = self.rfile.read(length) if length else None
         fwd = {k: v for k, v in self.headers.items()
                if k.lower() not in _HOP_HEADERS}
+        conn = None
         try:
             conn = _upstream(_STATE["upstream"])
             conn.request(self.command, self.path, body=body, headers=fwd)
             resp = conn.getresponse()
-            data = resp.read()
         except (OSError, http.client.HTTPException) as exc:
+            if conn is not None:
+                conn.close()
             self._send_json(502, {"error": f"backend unreachable: {exc}"})
             return
-        self.send_response(resp.status)
-        for k, v in resp.getheaders():
-            if k.lower() not in _HOP_HEADERS:
-                self.send_header(k, v)
-        self.end_headers()
         try:
-            self.wfile.write(data)
-        except (OSError, BrokenPipeError):
-            pass
+            self.send_response(resp.status)
+            for k, v in resp.getheaders():
+                if k.lower() not in _HOP_HEADERS:
+                    self.send_header(k, v)
+            self.end_headers()
+            # Stream, never buffer: `stream: true` completions are SSE, and a
+            # buffered proxy turns time-to-first-token into total time. The
+            # response is close-delimited (HTTP/1.0 handler) unless upstream
+            # sent a Content-Length, which is forwarded as-is.
+            while chunk := resp.read1(64 * 1024):
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        except (OSError, http.client.HTTPException):
+            pass  # client went away, or upstream died mid-body
+        finally:
+            conn.close()
 
     do_GET = _handle
     do_POST = _handle
@@ -255,28 +276,37 @@ def main(argv=None) -> int:
         except (ValueError, OSError):
             pass
 
-    print(f"[proxy] waiting for backend {args.upstream}{args.health_path} …",
-          flush=True)
-    if not _wait_ready(args.upstream, args.health_path, args.ready_timeout_s):
-        print("[proxy] FATAL: backend never became ready", file=sys.stderr)
-        try:
-            child.terminate()
-        except (OSError, subprocess.SubprocessError):
-            pass
-        return 1
-    _STATE["upstream_ready"] = True
-    threading.Thread(target=_monitor,
-                     args=(child, args.upstream, args.health_path,
-                           args.unhealthy_exit_after, stop,
-                           args.monitor_interval_s),
-                     daemon=True).start()
-    server = ThreadingHTTPServer((args.host, args.port), _Handler)
-    print(f"[proxy] listening on http://{args.host}:{args.port} "
-          f"(upstream {args.upstream})", flush=True)
+    # Bind the published port *now*, not after the model loads: the supervisor
+    # picked it as free seconds ago, and a load can take minutes. Until the
+    # backend is healthy, /v1/models answers 503 so the supervisor keeps waiting.
     try:
-        server.serve_forever()
+        server = ThreadingHTTPServer((args.host, args.port), _Handler)
+    except OSError as exc:
+        print(f"[proxy] FATAL: cannot bind {args.host}:{args.port}: {exc}",
+              file=sys.stderr, flush=True)
+        _terminate_child(child)
+        return 1
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    print(f"[proxy] listening on http://{args.host}:{args.port} "
+          f"(upstream {args.upstream}); waiting for backend{args.health_path} …",
+          flush=True)
+    try:
+        if not _wait_ready(args.upstream, args.health_path, args.ready_timeout_s):
+            print("[proxy] FATAL: backend never became ready", file=sys.stderr)
+            _terminate_child(child)
+            return 1
+        _STATE["upstream_ready"] = True
+        threading.Thread(target=_monitor,
+                         args=(child, args.upstream, args.health_path,
+                               args.unhealthy_exit_after, stop,
+                               args.monitor_interval_s),
+                         daemon=True).start()
+        while not stop.wait(1.0):  # timed: the signal handler stays responsive
+            if child.poll() is not None:
+                return 1  # monitor normally catches this first
     except KeyboardInterrupt:
-        pass
+        _terminate_child(child)
     return 0
 
 

@@ -90,6 +90,13 @@ def validate_flags(
             [f"Recommended backend '{backend}' is not a known runtime."],
             [],
         )
+    # Shape is checked unconditionally: a non-flag key would be saved, then make
+    # the entry fail schema validation on every later load.
+    for flag in sorted(overrides):
+        if not _FLAG_RE.fullmatch(flag):
+            errors.append(f"`{flag}` is not a `--flag`-shaped override.")
+    if errors:
+        return errors, warnings
     surface = known_flags(rt.server.binary)
     if surface is None:
         warnings.append(
@@ -98,7 +105,7 @@ def validate_flags(
         )
         return errors, warnings
     for flag in sorted(overrides):
-        if not flag.startswith("--") or flag not in surface:
+        if flag not in surface:
             errors.append(
                 f"`{flag}` is not a flag of `{rt.server.binary}` "
                 f"(per its installed --help)."

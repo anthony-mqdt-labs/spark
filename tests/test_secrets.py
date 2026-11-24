@@ -46,7 +46,17 @@ def test_keychain_roundtrip(tmp_path):
         store.set(name, "new-value-456")
         assert store.get(name) == "new-value-456"
     finally:
-        store.delete(name)
+        try:
+            store.delete(name)
+        finally:
+            # Independent of the code under test: a broken delete() must not
+            # leak a test item into the real login keychain.
+            import subprocess
+
+            subprocess.run(
+                ["security", "delete-generic-password", "-s", "spark", "-a", name],
+                capture_output=True, check=False,
+            )
     assert not store.exists(name)
 
 

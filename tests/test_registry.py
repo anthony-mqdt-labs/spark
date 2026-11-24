@@ -54,14 +54,14 @@ def test_entry_persists_fields(paths):
     save_model(
         ModelEntry(
             id="m", hf_repo="org/M", quant="q4", params_billions=9.0,
-            launch_overrides={"ctx": "8192"},
+            launch_overrides={"--ctx-size": "8192"},
         ),
         paths,
     )
     m = resolve_model("m", paths)
     assert m.hf_repo == "org/M"
     assert m.params_billions == 9.0
-    assert m.launch_overrides == {"ctx": "8192"}
+    assert m.launch_overrides == {"--ctx-size": "8192"}
 
 
 def test_dflash_profile_roundtrips(paths):
