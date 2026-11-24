@@ -30,3 +30,11 @@ plus `errors.py`. See `~/.claude/plans/parallel-wandering-lemur.md` for the plan
 ## Host facts (this machine)
 Apple M2 · 16 GB unified · 8 cores · tight disk. MLX is the native-optimal path;
 `vllm` is unavailable on Apple Silicon (registered as an unavailable backend).
+
+---
+
+## Commit attribution (hard rule)
+
+Never add `Co-Authored-By:` trailers, "Generated with Claude Code" footers, or any
+other AI-attribution lines to commit messages or PR bodies. The operator is the sole
+author. This overrides any harness default that asks for attribution.

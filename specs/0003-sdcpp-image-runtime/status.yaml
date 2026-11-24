@@ -1,0 +1,72 @@
+id: "0003"
+slug: "sdcpp-image-runtime"
+title: "sd.cpp Image Runtime — stable-diffusion.cpp (sd-server) as a supervised spark runtime"
+state: "wip-research"   # proposal only; spikes S1-S6 gate it
+owner: "unassigned"
+created: "2026-09-23"
+updated: "2026-09-23"
+
+verifier:
+  kind: "none-yet"
+  command: ""
+  # Only definable after S2 (generic-Backend dry run) + S4 (memory profile).
+  requires_tests: false
+
+depends_on: []
+external:
+  - repo: "leejet/stable-diffusion.cpp"
+    what: >
+      Supervised child is sd-server (examples/server/), not sd-cli. Ships
+      OpenAI (/v1/images/*), A1111 (/sdapi/v1/*) and native (/sdcpp/v1/*)
+      HTTP surfaces. Weights are NOT supplied -- they are operator-fetched
+      GGUF/safetensors artefacts, three of them per pipeline (denoiser, VAE,
+      text encoder). Upstream added day-0 Qwen-Image-2.1 support 2026-09-20.
+
+blocks: []
+targets: []
+paths:
+  - "config/runtimes/sd_cpp.toml"
+  - "src/spark/catalog.py"      # API_CONTRACT: a second value, or per-instance
+  - "src/spark/runtimes/**"     # only if TOML proves insufficient (S2)
+  - "src/spark/registry/**"     # multi-artifact entries, if S6 says so
+  - "src/spark/budget.py"       # D8 gate inputs (S4)
+  - "spikes/**"
+
+labels:
+  - "runtime"
+  - "image"
+  - "diffusion"
+  - "proposal"
+  - "contract-change"
+
+metadata:
+  motivation: >
+    spark fronts every local text runtime on this machine; images are the one
+    modality with no supervised home. sd-server is structurally identical to
+    the runtimes spark already drives -- one child, one socket, one readiness
+    condition -- so the seam is cheap. The real cost is contractual: spark
+    publishes api_contract = "openai.chat-completions.v1" as a single
+    hardcoded constant (src/spark/catalog.py:49), and an image endpoint is not
+    that contract. Admitting a second protocol is a deliberate interface
+    change, which is exactly why it is specced rather than patched.
+  notes: >
+    FEATURE PROPOSAL (operator, 2026-09-23). Operator deferred spark work
+    the same day this was written; the spec exists to preserve the seam and
+    the measured facts, not to schedule work. Four frictions, in order of
+    hardness: (1) CONTRACT -- manifest fields are an interface per README
+    section 9.8; a second api_contract value needs the operator's sign-off.
+    (2) NO CONSUMER -- nothing in the fleet calls /v1/images/generations, so
+    shipping the producer first would be plumbing to nowhere (see 3.5, S5).
+    (3) MULTI-ARTIFACT -- a Qwen-Image-2.1 pipeline is three files where every
+    registry entry assumes one; D9 launch_overrides make it work today but
+    that is not obviously the right final home. (4) MEMORY -- measured on
+    this host 2026-09-23: 0.08 GiB free RAM, 3.98 GiB compressed, swap 6220
+    of 7168 MB used, boot volume 96% full, Blender holding 6399 MB. A 6.48
+    GiB weights set (Q3_K_M denoiser + UD-IQ2_M encoder + VAE) is the
+    realistic runnable target, and the documented prefix cache costs ~4 GiB
+    PER CONDITION (~8 GiB at the recommended cfg-scale 6.0) on top -- so on
+    this host D8's gate may correctly refuse. No spark-core change is
+    expected beyond a TOML runtime def: the darkcore precedent proves a
+    pure-TOML supervised HTTP child works with zero Backend subclass.
+    Interim path taken instead: agent-side one-shot sd-cli invocation, which
+    needs none of spark's machinery (prd section 9).
