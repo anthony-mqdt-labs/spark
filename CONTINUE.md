@@ -14,6 +14,13 @@ merge on the operator's word. The `Do next` items below still stand.
 
 ## Do next — concrete, unblocked
 
+0. **Hosted providers (spec 0004) are committed on `feat/hosted-provider-proxy`
+   (unmerged, unpushed).** The only step left is the live smoke test, which needs the
+   operator's keys: `spark secret set openrouter_api_key` /
+   `deepseek_api_key`, then `spark run openrouter` (8100) / `spark run deepseek`
+   (8101) and one `curl …/v1/chat/completions` each. Registry entries already
+   exist in `~/.local/share/spark/models/{openrouter,deepseek}.toml`.
+
 1. **Pin `minicpm5-2b-8bit`'s backend.** Its `research_status` is `pending`, so
    the registry carries no backend and `spark run` picks one at launch. A staged
    result (claude, 2026-09-18) recommends mlx_lm / q8 / ctx 32768, no overrides:

@@ -81,6 +81,31 @@ def _expand_binary(v: str) -> str:
     return os.path.expandvars(os.path.expanduser(v))
 
 
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+
+
+def check_provider_base_url(v: str) -> str:
+    """The key rides on every request to this URL: it must be TLS, unless the
+    upstream is this machine (test doubles). No query/fragment/userinfo."""
+    if not v:
+        return v
+    from urllib.parse import urlsplit
+
+    parts = urlsplit(v)
+    host = parts.hostname or ""
+    if parts.scheme == "https" and host:
+        pass
+    elif parts.scheme == "http" and host in _LOOPBACK_HOSTS:
+        pass
+    else:
+        raise ValueError(
+            f"provider_base_url {v!r} must be https://<host>/... (plain http only for loopback)"
+        )
+    if parts.query or parts.fragment or parts.username or parts.password:
+        raise ValueError(f"provider_base_url {v!r} must not carry a query, fragment, or userinfo")
+    return v.rstrip("/")
+
+
 class DetectSpec(_Strict):
     """How to detect a runtime's presence and version."""
 
@@ -140,11 +165,25 @@ class ServerSpec(_Strict):
     relay_base_url: str = ""
     # Health endpoint path on the external relay service (default "/health").
     relay_health_endpoint: str = "/health"
+    # Hosted-provider backends (OpenRouter, DeepSeek, ...): a non-empty base URL
+    # makes spark launch shims/provider_proxy.py, a loopback proxy that injects
+    # the key from secret_env SPARK_PROVIDER_API_KEY. https only (loopback http
+    # allowed for tests). ``binary``/``args_template`` are ignored.
+    provider_base_url: str = ""
+    # GET with the key before launch: 401/403 fails fast instead of restarting.
+    provider_auth_check_path: str = "/models"
+    # Upstream socket timeout; reasoning models can stall long between tokens.
+    provider_timeout_s: float = Field(600.0, gt=0)
 
     @field_validator("binary")
     @classmethod
     def _expand(cls, v: str) -> str:
         return _expand_binary(v)
+
+    @field_validator("provider_base_url")
+    @classmethod
+    def _provider_url(cls, v: str) -> str:
+        return check_provider_base_url(v)
 
 
 class RuntimeDef(_Strict):
@@ -333,6 +372,9 @@ class ModelEntry(_Strict):
     research_status: Literal["pending", "staged", "registered", "manual"] = "pending"
     aliases: list[str] = Field(default_factory=list)
     notes: str = ""
+    # Hosted-provider entries: the provider's model id published as the
+    # endpoint's api_model_id (e.g. "deepseek-chat"). Clients may send any other.
+    remote_model: str = ""
     # Opt-in speculative-decoding profile; None = model has no DFlash path (--dflash errors).
     dflash: DFlashProfile | None = None
 

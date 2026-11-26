@@ -261,7 +261,7 @@ def _spawn_backend(argv: list[str]) -> "subprocess.Popen[bytes]":
     return subprocess.Popen(argv)
 
 
-def _adopted_server(fd: int, host: str, port: int) -> ThreadingHTTPServer:
+def _adopted_server(fd: int, host: str, port: int, handler=None) -> ThreadingHTTPServer:
     """Serve on spark's pre-bound listening socket instead of binding our own.
 
     ``SPARK_LISTEN_FD`` arrives via ``pass_fds`` from the supervisor, which held
@@ -277,7 +277,7 @@ def _adopted_server(fd: int, host: str, port: int) -> ThreadingHTTPServer:
             self.server_name = host
             self.server_port = port
 
-    return _AdoptedServer((host, port), _Handler)
+    return _AdoptedServer((host, port), handler or _Handler)
 
 
 def _probe_health(parts: urllib.parse.ParseResult, health_path: str) -> bool:

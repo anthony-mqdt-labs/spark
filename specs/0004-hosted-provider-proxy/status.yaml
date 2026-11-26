@@ -1,0 +1,31 @@
+id: "0004"
+slug: "hosted-provider-proxy"
+title: "Hosted provider proxy — OpenRouter + DeepSeek behind a key-injecting loopback proxy"
+state: "implemented"
+owner: "operator"
+created: "2026-11-26"
+updated: "2026-11-26"
+
+verifier:
+  kind: "pytest"
+  command: ".venv/bin/python -m pytest tests/test_provider_proxy.py -q"
+  requires_tests: true
+
+depends_on: []
+external:
+  - repo: "openrouter.ai"
+    what: "OpenAI-compatible at https://openrouter.ai/api/v1; key check GET /key."
+  - repo: "api.deepseek.com"
+    what: "OpenAI-compatible at https://api.deepseek.com; key check GET /models (401 unauth)."
+
+paths:
+  - "config/runtimes/openrouter.toml"
+  - "config/runtimes/deepseek.toml"
+  - "src/spark/runtimes/provider.py"
+  - "src/spark/shims/provider_proxy.py"
+  - "src/spark/config/schema.py"
+  - "src/spark/errors.py"
+  - "tests/test_provider_proxy.py"
+
+remaining:
+  - "P6 live smoke: operator stores keys, then spark run openrouter / deepseek + one curl each."

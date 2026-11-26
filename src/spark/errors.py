@@ -107,6 +107,16 @@ class SecretBackendError(SecretError):
     code = "SEC_BACKEND"
 
 
+class ProviderAuthError(SecretError):
+    """A hosted provider rejected the stored API key (401/403)."""
+
+    code = "SEC_REJECTED"
+    default_remediation = (
+        "Re-store a valid key: spark secret set <name>",
+        "Check the key is active (not revoked, out of credit) in the provider dashboard.",
+    )
+
+
 class SecretLeakError(SparkError):
     """The research guard caught secret material in an outbound prompt."""
 
@@ -185,6 +195,17 @@ class PortInUseError(ResourceError):
 # --- run / supervisor ----------------------------------------------------------
 class LaunchError(SparkError):
     code = "RUN_LAUNCH"
+
+
+class ProviderUnreachableError(SparkError):
+    """A hosted provider's API could not be reached (DNS, TLS, timeout, 5xx)."""
+
+    code = "NET_UNREACHABLE"
+    exit_code = 75  # EX_TEMPFAIL
+    default_remediation = (
+        "Check network connectivity, then retry.",
+        "Check the provider's status page; a 5xx is theirs, not spark's.",
+    )
 
 
 class HealthCheckError(SparkError):

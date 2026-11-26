@@ -1,0 +1,31 @@
+# DeepSeek — hosted, OpenAI-compatible first-party API.
+#
+# spark launches shims/provider_proxy.py: a loopback proxy that injects the key
+# from the Keychain. Consumers use http://127.0.0.1:<port>/v1 with NO key and
+# DeepSeek model ids ("deepseek-chat", "deepseek-reasoner").
+#   spark secret set deepseek_api_key
+name = "deepseek"
+description = "DeepSeek hosted API via spark's key-injecting loopback proxy."
+model_format = "any"
+requires_local_weights = false
+install_hint = "Nothing to install. Store a key: spark secret set deepseek_api_key"
+
+[detect]
+binary = "true"
+version_args = []
+
+[server]
+# Local /v1/chat/completions -> https://api.deepseek.com/chat/completions.
+provider_base_url = "https://api.deepseek.com"
+# GET /models requires auth (401 without a valid key; verified 2026-11-26).
+provider_auth_check_path = "/models"
+# deepseek-reasoner can think for minutes before the first content token.
+provider_timeout_s = 600.0
+openai_compatible = true
+default_port = 8101     # hosted providers sit just above the local range [8095, 8099]:
+                        # no collision with local servers; drift falls back into the range
+health_path = "/health"
+ready_timeout_s = 15.0
+
+[server.secret_env]
+SPARK_PROVIDER_API_KEY = "deepseek_api_key"

@@ -4,7 +4,9 @@ A hardened wrapper that fronts **every local LLM inference runtime** on this
 machine behind one command. Type `spark`, fuzzy-tab through available models, hit
 enter — the best-optimized runtime server for that model launches. `spark download
 <hf-repo>` fetches a model and runs a multi-agent research chain to discover the
-optimal per-runtime configuration for *this* host.
+optimal per-runtime configuration for *this* host. Hosted OpenAI-compatible APIs
+(OpenRouter, DeepSeek) are served the same way, through a loopback proxy that holds
+the API key ([§3](#common-workflows)).
 
 > **This README is the source of truth for design intent.** It explains not just
 > *what* the code does but *why*, and — critically — documents the **integrations
@@ -37,8 +39,10 @@ optimal per-runtime configuration for *this* host.
 
 **spark is an orchestrator, not an inference engine.** It does not implement model
 loading, tokenization, or generation. It *drives already-installed runtime CLIs*
-(`mlx_lm.server`, `mlx_vlm.server`, `omlx`, `llama-server`, `ollama`) as
-subprocesses, choosing the right one per model and managing its lifecycle.
+(`mlx_lm.server`, `mlx_vlm.server`, `omlx`, `llama-server`, `ollama`, plus the
+`prism_ml` and `darkcore` children) as subprocesses, choosing the right one per
+model and managing its lifecycle. Hosted providers get the same supervision via
+spark's own stdlib proxy (`shims/provider_proxy.py`).
 
 The single most important architectural consequence: **spark's own Python
 environment never imports `mlx`, `vllm`, `torch`, or `llama_cpp`.** Its runtime
@@ -50,7 +54,8 @@ What spark provides on top of the raw runtimes:
 - **Per-model, per-host optimal config** discovered by an agent research chain.
 - **A hardened process supervisor** (preflight resource gates, health checks,
   bounded crash recovery, graceful shutdown).
-- **A secrets vault** that keeps tokens out of files, argv, logs, and LLM prompts.
+- **A secrets vault** that keeps tokens out of files, argv, logs, and LLM prompts —
+  and out of consumer apps (the provider proxy injects keys upstream).
 - **Structured JSONL telemetry** sufficient to diagnose failures post-hoc.
 
 ---
@@ -65,7 +70,7 @@ spark was designed on and for a specific class of machine. The detected host:
 | Memory | **16 GB unified** (shared CPU/GPU/OS) | Hard ceiling on model size → memory budgeting is a launch gate, not advice |
 | Cores | 8 (4P+4E) | — |
 | Arch / OS | arm64 / Darwin | Gates which runtimes are even installable |
-| Disk | ran ~95% full (~24 GiB free) | Disk headroom is a **first-class fail state** for downloads |
+| Disk | runs near-full (has been ~95%) | Disk headroom is a **first-class fail state** for downloads |
 
 These facts are *probed at runtime* (see [§8 Probe](#probe-srcsparkprobe)), not
 hardcoded — but the defaults in `config/defaults.toml` (memory fraction, disk
@@ -81,7 +86,11 @@ preference order would warrant adjustment.
 | `mlx_vlm` | ✅ installed | **Primary — vision/multimodal** |
 | `llama_cpp` | ✅ installed | **#2 — GGUF/Metal**, broadest model coverage |
 | `omlx` | ✅ installed | Alt MLX server (LRU multi-model) |
-| `ollama` | ✅ installed | Convenience daemon |
+| `ollama` | ✅ installed | Convenience daemon (attach, never own) |
+| `prism_ml` | ✅ installed | PrismML Hadamard packs via shim ([D12](#d12-prism_ml-serves-hadamard-packs-through-a-shim-not-a-fork)) |
+| `openrouter`, `deepseek` | ✅ always | Hosted APIs via key-injecting proxy ([D19](#d19-hosted-providers-are-a-proxy-not-a-relay)) |
+| `relay` | ✅ always | Attach to an external OpenAI-compatible URL |
+| `darkcore` | ⚠ needs `$DARKCORE_ROUTER_DIR` | Patchwork dynamic router child |
 | `vllm` | ❌ absent | Registered but **unavailable on Apple Silicon** by design |
 
 ---
@@ -91,14 +100,15 @@ preference order would warrant adjustment.
 ```
 spark                          # what this host can serve (disk truth, registry or not)
 spark <model>                  # launch the best-optimized runtime server for <model>
+spark run <model> [--backend X] [--force] [--reprobe] [--dflash]   # same, with flags
 spark download <hf-repo>       # fetch + research + register (stages config for review)
 spark adopt <repo|path>        # register on-disk weights (hub cache or store) as-is
 spark research <model>         # (re-)run the research chain for a registered model
 spark config review <model> [--accept|--reject]   # apply/discard staged research
 spark config import <model>    # import research JSON from stdin (manual path)
-spark doctor                   # probe host + runtime availability + budgets
+spark doctor [--no-cache] [--fix]   # probe host + runtimes + budgets; --fix installs missing runtime py deps
 spark list [--all]             # runnable models (default) / everything (--all)
-spark catalog [--json]         # the machine-readable roster (catalog.json)
+spark catalog [--json] [--refresh]   # the machine-readable roster (catalog.json)
 spark forget <model>           # remove a registry entry (weights untouched)
 spark secret set|ls|rm|get <name>                 # macOS Keychain vault
 spark config validate|path|show [--json]          # inspect configuration (compact; --json = full)
@@ -146,7 +156,9 @@ workflows below: `download` (weights not here) or `adopt` (weights already here)
 — the entry's pinned one, else the highest-preference available runtime that is
 format-compatible — and supervises it (preflight gates, health + warmup
 verification, bounded restart, graceful Ctrl+C). Flags: `--backend` to force one,
-`--force` to bypass memory/disk gates, `--reprobe` to re-detect the host first.
+`--force` to bypass the memory gate and the missing-weights / already-serving
+refusals (never the fetch disk floor), `--reprobe` to re-detect the host first,
+`--dflash` for the entry's opt-in speculative-decoding profile.
 
 **Register weights already on disk** (hub cache or store — the `not registered`
 rows of `spark list`). Three steps, in order — each depends on the previous:
@@ -172,6 +184,61 @@ gone (re-fetch with the printed `spark download …`, or drop with `spark forget
 <model>` — registry entry only, weights untouched) and cached repos spark
 cannot serve (embeddings/speech, with reasons).
 
+**Use a hosted provider (OpenRouter, DeepSeek).** spark runs a loopback proxy
+that holds the API key, so your app talks to `127.0.0.1` with **no key**. One-time
+setup per provider, in order:
+
+```bash
+# 1. Store the key in the Keychain (hidden prompt; never argv, never a file)
+spark secret set openrouter_api_key        # DeepSeek: deepseek_api_key
+
+# 2. Register the provider (one entry per provider; ids/backends must match)
+cat > ~/.local/share/spark/models/openrouter.toml <<'TOML'
+id = "openrouter"
+backend = "openrouter"
+model_format = "any"
+research_status = "manual"
+remote_model = "deepseek/deepseek-chat"    # optional: default id published to consumers
+TOML
+#    DeepSeek: id/backend = "deepseek", remote_model = "deepseek-chat"
+
+# 3. Run it (Ctrl+C stops). The key is checked BEFORE the proxy starts.
+spark run openrouter                       # → http://127.0.0.1:8100/v1   (deepseek: 8101)
+```
+
+Point any OpenAI SDK at the printed base URL (the endpoint is also published in
+`run/instances/<id>.json`, [§9.8](#98-consumer-endpoint-discovery--the-published-record))
+with any placeholder key, and send
+the **provider's own model ids**: OpenRouter ids like `deepseek/deepseek-chat`;
+DeepSeek ids `deepseek-chat` or `deepseek-reasoner`. Streaming works.
+
+```bash
+curl -s 127.0.0.1:8100/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"deepseek/deepseek-chat","messages":[{"role":"user","content":"hi"}]}'
+```
+
+```python
+from openai import OpenAI
+client = OpenAI(base_url="http://127.0.0.1:8100/v1", api_key="unused")  # spark injects the real key
+client.chat.completions.create(model="deepseek/deepseek-chat", messages=[{"role": "user", "content": "hi"}])
+```
+
+If it fails:
+
+| Error / status | Meaning | Do this |
+|---|---|---|
+| `SEC_NOT_FOUND` | no key stored | `spark secret set <provider>_api_key` |
+| `SEC_REJECTED` | provider returned 401/403 for the key | re-store a valid key; check credit/revocation |
+| `NET_UNREACHABLE` | DNS/TLS/timeout/5xx at launch | check network; provider status page |
+| HTTP 403 from proxy | `Host` header not loopback | use `127.0.0.1` / `localhost` in the base URL |
+| HTTP 415 from proxy | POST without `Content-Type: application/json` | SDKs set this; add it to raw requests |
+| HTTP 502 `spark_proxy_error` | provider unreachable for that request | retry; see `logs/<provider>/` |
+
+Per-request logs (model, status, latency; never content or key) land in
+`~/.local/share/spark/logs/<provider>/<date>.jsonl`. Adding another
+OpenAI-compatible provider is a TOML file in `config/runtimes/` (copy
+`openrouter.toml`; §8 Runtimes). Remove one with `spark forget <id>`.
+
 **Secrets & config.** `spark secret set|ls|rm|get <name>` (Keychain; `get`
 needs `--reveal`). `spark config validate|path|show` to inspect; research
 staging lives outside it (`review`/`import`).
@@ -196,12 +263,16 @@ spark/
 │   ├── config/                  # paths.py (platformdirs/XDG), schema.py (pydantic), loader.py
 │   ├── secrets/                 # store.py (ABC + redaction), keychain.py (ctypes Security)
 │   ├── runtimes/                # base.py (Backend ABC + registry) + per-runtime adapters
-│   ├── shims/                     # standalone servers run by foreign interpreters
-│   │                              #   (shim-only dir: a script's dir is on sys.path,
-│   │                              #   so runtimes/mlx_lm.py would shadow real mlx_lm)
+│   ├── shims/                   # standalone stdlib servers spark supervises as children:
+│   │                            #   openai_filter_proxy (mlx_lm listing), provider_proxy
+│   │                            #   (hosted APIs) run on spark's interpreter; prism_shim
+│   │                            #   on mlx-lm's. Shim-only dir: a script's dir is on
+│   │                            #   sys.path, so runtimes/mlx_lm.py would shadow mlx_lm
 │   ├── probe/                   # host.py (capability detection + cached profile)
 │   ├── registry/                # models.py (one TOML/model, fuzzy resolve),
-│   │                            #   adopt_errors.py (typed adopt-failure factories)
+│   │                            #   availability.py (entry vs disk), store.py (store
+│   │                            #   scan), adopt_errors.py (typed adopt failures)
+│   ├── catalog.py               # catalog.json + run/instances publishing (§9.8)
 │   ├── inventory.py             # disk-first join: store + hub cache vs registry
 │   ├── budget.py                # memory/disk gates + metadata hydration
 │   ├── hf_cache.py              # HF cache paths, repo-id and ref validation
@@ -211,12 +282,15 @@ spark/
 │   ├── research/                # types/guard/prompt/providers/chain/staging/validate
 │   ├── telemetry/               # jsonl.py (structured logging; redaction imported)
 │   └── errors.py                # typed errors carrying remediation
-├── tests/                       # pytest (564 tests)
+├── tests/                       # pytest (~625 tests)
+├── specs/<NNNN>-<slug>/         # PRDs + status.yaml (0004: hosted providers)
 ├── spikes/                      # time-boxed evaluation spikes + the portable
 │                                #   human/emotion eval skill (spikes/README.md)
 ├── bake-offs/                   # comparative model bake-offs — quality evals,
 │                                #   distinct from patchwork's throughput benches
-└── MODEL-EVAL-2026-07-15.md     # cross-model capability matrix + tactical use/dismissal
+├── MODEL-EVAL-2026-07-15.md     # cross-model capability matrix + tactical use/dismissal
+├── RELAY-USAGE.md               # relay how-to (overstates relay: see §8 Runtimes)
+└── CONTINUE.md                  # session handoff: unfinished work only
 ```
 
 > **Model evaluation artifacts.** `spikes/`, `bake-offs/`, and the dated
@@ -254,7 +328,8 @@ Supervisor(backend, entry, cfg, profile, paths, secrets).run()
       · disk: enforced when the launch can write (absent weights / forced fetch),
         advisory when the weights are already local — a tight disk must not block
         a run that writes nothing.
-  → backend.prepare(entry)               # e.g. ollama: ensure daemon + pull tag
+  → backend.prepare(entry)               # ollama: ensure daemon + pull tag;
+                                         #   providers: key stored + accepted upstream
   → attach-mode? if daemon already healthy → monitor without owning
   → build_launch_cmd(entry, host, port)  # template ⊕ resolved model ⊕ override flags
   → child env = os.environ ⊕ extra_env ⊕ resolved secret_env (values injected here only)
@@ -266,7 +341,7 @@ Supervisor(backend, entry, cfg, profile, paths, secrets).run()
 ### `spark download <hf-repo>`
 ```
 _slug(repo) + _infer(repo)               # id, model_format (gguf/mlx/mlx-vlm), quant, params
-disk preflight (the 24 GiB wall)
+disk preflight (disk.min_free_gib floor)
 hf download <repo> --local-dir <store>/<id>     # HF_TOKEN injected to env iff stored
 save_model(entry)                        # registry, research_status="pending"
 perform_research(ctx, entry)             # unless --no-research / research.enabled=false
@@ -350,9 +425,11 @@ because `__file__` points into the repo `src/`.
 **Data directory** (`~/.local/share/spark/`, mode 0700):
 `models/<id>.toml` · `store/<id>/` (downloaded weights) · `staging/<id>.json`
 (research awaiting review) · `logs/<component>/<date>.jsonl` · `host.toml`
-(probe cache) · `run/` (including `run/locks/` — one flock per published
-endpoint, so a SIGKILLed publisher's manifest is detectable without a `ps` fork)
-· `secrets-index.json` (non-secret names only).
+(probe cache) · `logs/servers/<id>.log` (child stdout/stderr, scrubbed, rolled)
+· `catalog.json` + `run/instances/<id>.json` (published roster/endpoints, §9.8)
+· `run/locks/` (one flock per published endpoint, so a SIGKILLed publisher's
+manifest is detectable without a `ps` fork) · `secrets-index.json` (non-secret
+names only).
 
 ---
 
@@ -411,7 +488,7 @@ unknown names fall back to the generic `Backend`. Key methods:
 
 Adapters and their quirks:
 - **`mlx_lm`** — `mlx_lm.server --model <path|repo> --host --port`; accepts a local
-  dir or an HF repo id. Primary text path. Ports default 8080. Runs behind
+  dir or an HF repo id. Primary text path. Port 8095 (canonical). Runs behind
   `shims/openai_filter_proxy.py` (`[server] filter_models=true`): the proxy binds
   the published port, spawns the real server on an ephemeral loopback port, and
   answers `GET /v1/models` from spark's inventory (registered ∩ present,
@@ -423,12 +500,15 @@ Adapters and their quirks:
   check-then-bind race for this path. Backends that bind their own port still
   have a residual window spark cannot close without runtime cooperation.
 - **`mlx_vlm`** — `mlx_vlm.server`; vision. Its binary defaults to host `0.0.0.0`,
-  so the template **pins `--host 127.0.0.1`** (no LAN exposure). Port 8081.
+  so the template **pins `--host 127.0.0.1`** (no LAN exposure). Port 8095 (it and
+  `mlx_lm` share the canonical endpoint; a second server drifts within the range).
 - **`llama_cpp`** — resolves to a local `.gguf` file (`--model`, picks the
   `00001-of` shard for splits) **or** an HF repo (`-hf user/repo[:quant]`, which
   `llama-server` downloads itself). Static Metal flags from TOML: `-ngl 999 -fa
-  auto --jinja`. Health is `/health` (not `/v1/models`). Port 8082.
-- **`omlx`** — `omlx serve <model> --host --port --memory-guard safe`. Port 8083.
+  auto --jinja`. Health is `/health` (not `/v1/models`). Port 8096.
+- **`omlx`** — `omlx serve <model> --host --port --memory-guard safe`. Port 8097.
+- **`prism_ml`** — `shims/prism_shim.py` on the mlx-lm tool interpreter serves
+  PrismML Hadamard packs (`model_format="prism"`); see D12. Port 8098.
 - **`ollama`** — daemon-style. `attach_if_running=true`: if the daemon is already
   healthy, **attach (never spawn/kill the shared daemon)**. `prepare()` requires
   the daemon (`/api/tags`) and `ollama pull`s the tag if missing. OpenAI endpoint
@@ -436,14 +516,26 @@ Adapters and their quirks:
 - **`vllm`** — registered with `requires_os=["Linux"]` + `unavailable_reason`; on
   this host `is_available()=False` with actionable guidance. Kept so the config
   travels unchanged to a CUDA host.
-- **`relay`** — attach-only proxy to an external OpenAI-compatible service
-  (`relay_base_url` in its TOML); never spawns or kills a process. It owns its
-  weights, so the launch preflight does not look for local ones. See
-  `RELAY-USAGE.md`.
+- **`relay`** — attach-only: health-checks an external OpenAI-compatible service
+  (`relay_base_url`) and publishes **that URL** as the endpoint; it never spawns,
+  kills, or proxies anything, and injects no auth. `RELAY-USAGE.md` describes a
+  spark-side proxy on `:8080` that does not exist — trust this paragraph. For an
+  API that needs a key, use a hosted-provider runtime instead.
+- **`openrouter`, `deepseek`** (hosted providers, spec 0004) — any runtime TOML
+  with `[server] provider_base_url` gets `ProviderBackend`, so a new
+  OpenAI-compatible provider is config only. The supervised child is
+  `shims/provider_proxy.py`, a loopback proxy that injects
+  `Authorization: Bearer <key>` (Keychain → `secret_env SPARK_PROVIDER_API_KEY`
+  → child env). Consumers use `http://127.0.0.1:<port>/v1` with **no key** and
+  send the provider's own model ids. `prepare()` checks the key before spawn:
+  missing → `SEC_NOT_FOUND`, 401/403 → `SEC_REJECTED` (never retried). Ports
+  8100/8101, deliberately above the local range so they never collide with a
+  local server. Per-request JSONL lands in `logs/<runtime>/`. Operator steps:
+  §3 "Use a hosted provider".
 - **`darkcore`** — spawns the patchwork dynamic router under the supervisor
   (`python -m darkcore.server` from its own uv venv, set via `$DARKCORE_ROUTER_DIR`).
-  Like relay, the router resolves its own tier weights. See
-  `specs/0003-sdcpp-image-runtime/prd.md` for the seam precedent.
+  Like relay, the router resolves its own tier weights. Pure-TOML runtime (generic
+  `Backend`, no subclass), the precedent spec 0003 builds on. Port 8000.
 
 ### Probe (`src/spark/probe/`)
 Detects chip/memory/cores + per-runtime presence (`shutil.which`), version
@@ -465,8 +557,10 @@ Preflight → `prepare()` → attach-or-spawn → `wait_ready` (poll `health_url
 peak RSS) → on unexpected exit, restart with exponential backoff
 (`backoff_base 1s → backoff_max 30s`, `max_restarts 3`) → else
 `RecoveryExhaustedError` with remediation. SIGINT/SIGTERM set a stop event →
-graceful `terminate` (SIGTERM, `shutdown_grace 10s`, then SIGKILL). Child inherits
-stdout/stderr so the operator sees server logs live. **Attach mode** (daemons):
+graceful `terminate` (SIGTERM, `shutdown_grace 10s`, then SIGKILL). Child
+stdout/stderr go through a **scrubbing pipe** (registered secrets masked) to
+`logs/servers/<id>.log`, rolled at `server_log_roll_mib`; the CLI tails it on
+failure. Lazy loaders also pass the warmup gate (§5 Readiness). **Attach mode** (daemons):
 uses the fixed `default_port` (does not reassign), and never terminates a process
 it did not start.
 
@@ -583,10 +677,11 @@ The fuzzy `spark <Tab>` menu depends on a chain of files **outside this repo**:
 - **`claude`** is verified: `claude -p --output-format json` reads the prompt on
   **stdin** and returns a JSON envelope whose `.result` holds the model's text
   (hence `parse="json_envelope"`, `envelope_field="result"`).
-- **`hermes`** (`~/.local/bin/hermes`) and **`pi`** (`~/.bun/bin/pi`) are present
-  but their command templates are **best-guess** (`-p` + stdin, `parse="raw_json"`).
-  If you wire them for real, confirm each CLI's actual flags and JSON behavior and
-  fix the TOML — don't assume.
+- **`hermes`** (`~/.local/bin/hermes`): `hermes -t clarify -z <prompt>` (oneshot,
+  prompt as argv, prints only the response) — verified live, `parse="raw_json"`.
+- **`pi`** (`~/.bun/bin/pi`): `pi -p --no-tools <prompt>`, `parse="raw_json"`. It
+  needs pi's own `defaultProvider` reachable (ollama on this host), so it is the
+  fallback most often unavailable. Re-verify either if its CLI changes flags.
 - Running `claude` from inside spark spawns a **nested** Claude Code session (real
   cost + network). `spark download` runs it by default; `--no-research` opts out.
 
@@ -595,7 +690,12 @@ The fuzzy `spark <Tab>` menu depends on a chain of files **outside this repo**:
   this to `0.0.0.0` without intent — `mlx_vlm.server` defaults to `0.0.0.0` and is
   explicitly pinned back to loopback in its TOML.
 - Egress happens only in: `hf download`, llama `-hf`, the public model-card fetch,
-  and the agent CLIs. Everything else (probe, launch, health) is local.
+  the agent CLIs, and hosted-provider proxies (verified TLS to the TOML's
+  `provider_base_url` only). Everything else (probe, launch, health) is local.
+- The provider proxy treats loopback as reachable from any browser tab. It
+  requires a loopback `Host` (DNS rebinding) and `application/json` POSTs
+  (forces a CORS preflight, which it never answers). It forwards only `GET`/`POST`
+  under `/v1/`, and it never forwards the client's `Authorization`/`Cookie`.
 
 ### 9.8 Consumer endpoint discovery — the published record
 
@@ -621,7 +721,9 @@ data dir are the contract:
   just the live endpoint) read this instead of parsing `spark list`.
 
 The port convention is part of the same contract: spark's own servers prefer
-8095 (`general.port_range = [8095, 8099]`; llama.cpp 8096, oMLX 8097). A taken
+8095 (`general.port_range = [8095, 8099]`; llama.cpp 8096, oMLX 8097, prism_ml
+8098), hosted providers 8100/8101 (outside the range, so they never take a local
+server's slot; if busy they drift into it). A taken
 preferred port still causes drift, but drift is now logged (`port_drift`) and
 published, so a consumer that reads the instance record is unaffected.
 
@@ -777,6 +879,13 @@ of restarts by day four. `restarts` in the exit event is the session total. Any 
 path out of `Supervisor.run`, including an unanticipated exception, terminates
 the child (no orphaned server holding port and RAM).
 
+### D19. Hosted providers are a proxy, not a relay
+`relay` hands the consumer the upstream URL, so the consumer would also need the
+key. Providers instead run a supervised loopback proxy that holds the key, which
+gets them the same lifecycle, manifest, catalog, and restart policy as a local
+server. Health stays local (`/health` on the proxy) so the 5 s probe never bills
+the API. A rejected key is checked once, before spawn: no restart can fix it.
+
 ---
 
 ## 11. Failure handling & logging contract
@@ -809,18 +918,22 @@ result), `process_crash`, `restart_scheduled`, `process_exit` (wall time, peak R
 
 ## 12. Testing
 
-`uv run pytest` — 564 tests, no live LLM/Keychain required for the suite (the
+`uv run pytest` — ~625 tests, no live LLM/Keychain/network required for the suite (the
 Keychain roundtrip test self-skips off macOS; research uses fake providers and a
 real-subprocess JSON test that needs no model). Coverage spans: config
 merge/precedence, secret redaction + name validation, Keychain roundtrip, probe
 parsing/gating, backend launch-cmd construction (incl. llama `-hf` vs local gguf,
 override flags), backend selection/routing, registry fuzzy resolution, supervisor
 port-pick/backoff/attach/prepare, budget math, download inference, research guard
-+ JSON extraction + chain fallback + staging.
++ JSON extraction + chain fallback + staging, and the hosted-provider proxy
+end to end against loopback fake upstreams (plain and self-signed TLS):
+key injection, browser-abuse guards, SSE streaming, stall timeout, redirects,
+supervisor launch and crash-restart (`tests/test_provider_proxy.py`).
 
 Live verifications performed during development (not in the unit suite): real MLX
 model served end-to-end (observed port-fallback + crash recovery), llama.cpp GGUF
-via `-hf`, and a real `claude` research run → stage → accept.
+via `-hf`, a real `claude` research run → stage → accept, and the provider key
+check against the real OpenRouter/DeepSeek APIs (bogus key → `SEC_REJECTED`).
 
 ---
 
@@ -857,9 +970,11 @@ personal tool.
 
 - **Live-verify `mlx_vlm` / `omlx` / `ollama`** adapters (logic done + unit-tested;
   only `mlx_lm` and `llama_cpp` proven with a real served model).
-- **`hermes` / `pi` provider templates** are best-guess; only `claude` is verified.
-- **Distribution beyond this host**: editable install needs the repo present; a
-  built wheel (`uv build`) would let spark run on machines without the checkout.
+- **Hosted providers: live smoke with real keys** pending (spec 0004 P6). Deferred
+  by design: a local client token on the proxy (today any same-user process can
+  spend the key), model aliasing, upstream connection pooling.
+- **Distribution is local-only by decision**: the editable install *is* the
+  deployment; spark is not packaged or published.
 - **Store-backed models have no alias-shaped API id.** `mlx_lm.server` resolves
   the request `model` field itself, so a model served from the spark store can
   only be addressed by its absolute path; agent CLIs that validate model ids
@@ -869,8 +984,8 @@ personal tool.
 - **Port drift is published, not prevented.** 8095 is preferred; if it is taken,
   spark walks the range, logs `port_drift`, and writes the real endpoint to
   `run/instances/`. A consumer that does not read that file still breaks.
-- See `CONTINUE.md` for the current session handoff and `~/.claude/plans/
-  parallel-wandering-lemur.md` for the original approved plan.
+- See `CONTINUE.md` for the current session handoff and `specs/` for tracked
+  feature work.
 
 ---
 

@@ -1,0 +1,31 @@
+# OpenRouter — hosted, OpenAI-compatible, many upstream models behind one key.
+#
+# spark launches shims/provider_proxy.py: a loopback proxy that injects the key
+# from the Keychain. Consumers use http://127.0.0.1:<port>/v1 with NO key and
+# OpenRouter model ids (e.g. "deepseek/deepseek-chat", "openai/gpt-4o-mini").
+#   spark secret set openrouter_api_key
+name = "openrouter"
+description = "OpenRouter hosted API via spark's key-injecting loopback proxy."
+model_format = "any"
+requires_local_weights = false
+install_hint = "Nothing to install. Store a key: spark secret set openrouter_api_key"
+
+[detect]
+# No binary: the proxy runs under spark's own interpreter. `true` keeps the
+# probe's on-PATH check satisfied (same convention as relay).
+binary = "true"
+version_args = []
+
+[server]
+provider_base_url = "https://openrouter.ai/api/v1"
+# GET /key returns the key's own metadata; 401 when the key is bad.
+provider_auth_check_path = "/key"
+provider_timeout_s = 600.0
+openai_compatible = true
+default_port = 8100     # hosted providers sit just above the local range [8095, 8099]:
+                        # no collision with local servers; drift falls back into the range
+health_path = "/health"     # answered by the proxy itself, never upstream
+ready_timeout_s = 15.0
+
+[server.secret_env]
+SPARK_PROVIDER_API_KEY = "openrouter_api_key"

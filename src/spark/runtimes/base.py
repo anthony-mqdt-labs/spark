@@ -222,7 +222,11 @@ def get_backend(name: str, config: SparkConfig) -> Backend:
             remediation=["See available runtimes with `spark doctor`."],
         )
     rt = config.runtimes[name]
-    cls = _REGISTRY.get(name, Backend)
+    cls = _REGISTRY.get(name)
+    if cls is None:
+        # Hosted providers are pure config: any runtime with a provider URL
+        # gets the key-injecting proxy backend.
+        cls = _REGISTRY["_provider"] if rt.server.provider_base_url else Backend
     return cls(rt, config)
 
 
