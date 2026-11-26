@@ -4,49 +4,42 @@ Handoff for an agent resuming **unfinished** work. Completed history is not kept
 here: `git log`, `README.md`, and `../bugs/` are the record. Anything that is done
 gets deleted from this file rather than annotated. Overwrite at session end.
 
-**State, 2026-11-25.** The 2026-11-23 hardening pass is committed on `main`
-(`49d1f26`). A second, test-first review-hardening pass lives on the
-`review/hardening-regressions` branch: shared redaction registry, scrubbed
-per-server logs, real memory gate for disk-first launches, hub-ref path
-validation, instance/catalog write hardening, reserved research overrides, and
-unified fuzzy resolution. 368 tests pass on that branch. Review its diff and
-merge on the operator's word. The `Do next` items below still stand.
+**State, 2026-11-26.** `main` is the only branch. The hardening passes and spec
+0004 (hosted providers: OpenRouter and DeepSeek behind a key-injecting loopback
+proxy) are all merged into `main`. `main` is ahead of `origin/main` by the 0004
+work and this docs pass: push on the operator's word. 626 tests pass.
 
 ## Do next — concrete, unblocked
 
-0. **Hosted providers (spec 0004) are committed on `feat/hosted-provider-proxy`
-   (unmerged, unpushed).** The only step left is the live smoke test, which needs the
-   operator's keys: `spark secret set openrouter_api_key` /
-   `deepseek_api_key`, then `spark run openrouter` (8100) / `spark run deepseek`
-   (8101) and one `curl …/v1/chat/completions` each. Registry entries already
-   exist in `~/.local/share/spark/models/{openrouter,deepseek}.toml`.
+1. **Live smoke test of the hosted providers (spec 0004, P6).** It needs the
+   operator's keys:
+   - `spark secret set openrouter_api_key` and `spark secret set deepseek_api_key`
+   - then `spark run openrouter` (port 8100) and `spark run deepseek` (port 8101)
+   - then one `curl …/v1/chat/completions` each.
 
-1. **Pin `minicpm5-2b-8bit`'s backend.** Its `research_status` is `pending`, so
-   the registry carries no backend and `spark run` picks one at launch. A staged
-   result (claude, 2026-09-18) recommends mlx_lm / q8 / ctx 32768, no overrides:
-   `spark config review minicpm5-2b-8bit --accept`. Worth doing now — this is the
-   model banter's persisted endpoint names.
-2. **Reject the stale `ornith-1.0-9b-4bit` staged result.** It recommends
-   mlx_vlm, but the entry is deliberately `manual`/mlx_lm (inference-bench #002:
-   18.2 tok/s, and the bench chose it for this host), with DFlash opt-in via
-   `spark run ornith --dflash`. Accepting it would regress that call:
-   `spark config review ornith-1.0-9b-4bit --reject`.
-3. **Push `f4e30bb`** on the operator's word.
+   The registry entries already exist in
+   `~/.local/share/spark/models/{openrouter,deepseek}.toml`. On success, set
+   `specs/0004-*/status.yaml` `remaining: []`.
 
 ## Awaiting an operator decision
 
-- **Four entries assert weights that are gone** — `minicpm5-1b-8bit`,
-  `ornith-1.0-9b-4bit`, `qwen3.5-0.8b-optiq-4bit`, `ternary-bonsai-27b-mlx-2bit`.
-  `spark list` names the fetch and forget command for each. Re-fetch or drop is
-  the operator's call, not an agent's. `minicpm5-1b-8bit` is coupled to banter's
-  default model, so its fate tracks banter's.
+- **Four entries assert weights that are gone:** `minicpm5-2b-8bit`,
+  `ornith-1.5-9b-mlx-6bit`, `ternary-bonsai-2-27b-mlx-2bit`, and
+  `ternary-bonsai-8b-mlx-2bit` (`spark list --all`, checked 2026-11-26). That
+  leaves only darkcore and the two providers runnable. `spark list --all` prints
+  the fetch and forget command for each. Re-fetching or dropping them is the
+  operator's call, not an agent's. Banter's persisted endpoint names
+  `minicpm5-2b-8bit`, so that model's fate tracks banter's.
 - **pi/omp cannot see store-backed models.** Both drop an id that is an absolute
-  path, so a store model (`minicpm5-2b-8bit`) never appears in their pickers while
-  hub-cache ids do. The durable workaround is in place — `catalog.json` publishes
-  the working id per live instance. Open question: move that model to the hub
-  cache, or leave it.
-- **DFlash is wired but parked.** Opt-in profile; a net loss at 4-bit on this
-  17 GB box, worth revisiting on a ≥24 GB machine.
+  path. The durable workaround is in place: `catalog.json` publishes the working
+  id per live instance. Open question: move such models to the hub cache, or
+  leave them.
+- **DFlash is wired but parked.** It is an opt-in profile and a net loss at 4-bit
+  on this 16 GB box. Worth revisiting on a ≥24 GB machine.
+- **Hosted-provider follow-ups, deferred by design** (spec 0004 §7):
+  - a local client token on the proxy;
+  - model aliasing;
+  - upstream connection pooling.
 
 ## Deliberately gated — do not implement without the operator
 
@@ -54,31 +47,43 @@ merge on the operator's word. The `Do next` items below still stand.
   fleet authority. Spikes S1–S6 plus four open questions gate any `design.md`.
 - **spec 0002 `afm-on-device-runtime`** (`wip-research`): Apple Foundation Models
   as a supervised runtime. Spikes A1–A4 gate it.
+- **spec 0003 `sdcpp-image-runtime`** (`wip-research`): proposal only. Spikes
+  S1–S6 gate it.
 
 ## Environment blockers
 
-- **ollama daemon is down** (`curl 127.0.0.1:11434/api/version` fails), so the
-  `pi` research provider is unavailable; claude and hermes still serve the chain.
+- **The ollama daemon is down** (`curl 127.0.0.1:11434/api/version` fails,
+  2026-11-26), so the `pi` research provider is unavailable. claude and hermes
+  still serve the research chain.
+- **`darkcore` needs `$DARKCORE_ROUTER_DIR`** set to the router's project root.
+  `spark doctor` reports it unavailable until then.
 
-## Adjacent repos touched by the same work
+## Adjacent repos
 
-- **banter:** four commits unpushed (`8825dd8`, `824b0c8`, `ffc9cda`, `df0d765`);
-  spec 0028 is `in-flight`. Its recorded follow-up: the Rust `backend-spark`
-  adapter does not yet read the persisted endpoint record
-  (`python/.banter-endpoint.json`) — it keeps its environment contract and the
-  8095 default. See `banter/specs/0028-*/{status.yaml,runbook.md}`.
+- **banter:** in sync with `origin/main`. Spec 0028 is still `in-flight`, and its
+  recorded follow-up stands: the Rust `backend-spark` adapter does not yet read the
+  persisted endpoint record (`python/.banter-endpoint.json`). It keeps its
+  environment contract and the 8095 default. See
+  `banter/specs/0028-*/{status.yaml,runbook.md}`.
 
 ## Orientation — only what a resuming agent needs
 
-- spark supervises already-installed local runtimes and serves no inference
-  itself. `README.md` is design truth (§5 the availability contract, §9 the
-  external integrations that break silently).
-- Skills carrying the hard-won parts: `spark-operations` (the three namespaces,
-  ports, the completion contract, the `run/` manifests), `mlx-inference`,
-  `tui-keybinding-debugging` (pty verification for anything terminal-facing).
+- spark supervises already-installed local runtimes, and proxies hosted
+  OpenAI-compatible APIs through `shims/provider_proxy.py`. It serves no
+  inference itself.
+- `README.md` is design truth:
+  - §3 has the operator workflows, including hosted providers;
+  - §5 is the availability contract;
+  - §9 lists the external integrations that break silently;
+  - §10 is the decision log (D19 covers providers).
+- Hermes skills (not Claude Code ones) carry some hard-won detail:
+  `mlx-inference` and `tui-keybinding-debugging` in `~/.hermes/profiles/dev/skills/`.
+  `spark-operations` survives only in an archive (penny profile) and may be stale.
 - Tests: `cd ~/Repos/vibes/spark && .venv/bin/python -m pytest`. Isolate with
-  `SPARK_HOME=<dir>`. The editable install means source edits are live — only a
-  pyproject dependency change needs
-  `uv tool install --editable ../spark --reinstall`.
-- Consumers currently point at 8095: nine Hermes configs (`mlx-local`),
-  pi/omp/opencode providers, and banter's env plus Rust default.
+  `SPARK_HOME=<dir>`. The editable install makes source edits live. Only a
+  pyproject dependency change needs `uv tool install --editable ../spark --reinstall`.
+- Ports:
+  - Consumers point at 8095: nine Hermes configs (`mlx-local`), the pi/omp/opencode
+    providers, and banter's env plus its Rust default.
+  - Hosted providers prefer 8100 (OpenRouter) and 8101 (DeepSeek), outside the
+    local range [8095, 8099].

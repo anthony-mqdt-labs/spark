@@ -289,7 +289,7 @@ spark/
 ├── bake-offs/                   # comparative model bake-offs — quality evals,
 │                                #   distinct from patchwork's throughput benches
 ├── MODEL-EVAL-2026-07-15.md     # cross-model capability matrix + tactical use/dismissal
-├── RELAY-USAGE.md               # relay how-to (overstates relay: see §8 Runtimes)
+├── RELAY-USAGE.md               # relay how-to (attach to an external service)
 └── CONTINUE.md                  # session handoff: unfinished work only
 ```
 
@@ -518,9 +518,11 @@ Adapters and their quirks:
   travels unchanged to a CUDA host.
 - **`relay`** — attach-only: health-checks an external OpenAI-compatible service
   (`relay_base_url`) and publishes **that URL** as the endpoint; it never spawns,
-  kills, or proxies anything, and injects no auth. `RELAY-USAGE.md` describes a
-  spark-side proxy on `:8080` that does not exist — trust this paragraph. For an
-  API that needs a key, use a hosted-provider runtime instead.
+  kills, or proxies anything, and injects no auth. Its URL is a *runtime* setting
+  (`[runtimes.relay.server]` in the user config), not a model-entry field. Only
+  the runtime named `relay` gets this behaviour, so one target at a time. For an
+  API that needs a key, use a hosted-provider runtime instead. How-to:
+  `RELAY-USAGE.md`.
 - **`openrouter`, `deepseek`** (hosted providers, spec 0004) — any runtime TOML
   with `[server] provider_base_url` gets `ProviderBackend`, so a new
   OpenAI-compatible provider is config only. The supervised child is

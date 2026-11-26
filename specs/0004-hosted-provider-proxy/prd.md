@@ -1,6 +1,7 @@
 # 0004 — Hosted provider proxy (OpenRouter, DeepSeek)
 
-> **STATE: implemented** on `feat/hosted-provider-proxy`. Origin: 2026-11-26
+> **STATE: implemented, merged to `main`** (2026-11-26). Only the P6 live smoke
+> test with real keys remains. Origin: 2026-11-26
 > operator request. An app under development must test against spark's
 > OpenAI-compatible surface, with spark fronting hosted providers as well as
 > local runtimes.
@@ -37,7 +38,7 @@ provider's own model ids), and caching or cost accounting.
 | V2 | The supervisor already does spawn, health, bounded restart, the instance manifest, the catalog, and the reserved-fd port handoff. | **Reuse.** The proxy is just another supervised child. |
 | V3 | `openai_filter_proxy.py` holds a stdlib streaming passthrough plus fd adoption. | **Reuse** `_adopted_server` and `_HOP_HEADERS` (it gains a handler parameter). |
 | V4 | TLS: the venv Python (3.12.13, OpenSSL 3.5.5) verifies against `/etc/ssl/cert.pem`. Live check returned 200 from `openrouter.ai` and 401 from `api.deepseek.com`, unauthenticated. | **No `certifi`, no new dependency.** |
-| V5 | `relay` hands out the upstream URL, and its docs claim a proxy that does not exist. | Out of scope. The docs drift is flagged, not fixed here. |
+| V5 | `relay` hands out the upstream URL, and its docs claim a proxy that does not exist. | `RELAY-USAGE.md` was rewritten and verified end to end (2026-11-26 docs pass). Its old model TOML with `[server]` was invalid. |
 | V6 | `.claude/settings.local.json` allowlists `Bash(uv run *)` and `Bash(uv run python -c ' *)`, which amounts to arbitrary code execution without a prompt. No `dontAsk`. | Flagged to the operator. Not changed. |
 | V7 | `[build-system] requires = ["hatchling"]` is unpinned, unlike the runtime deps. It affects only an editable reinstall. | Flagged. Not changed (local-only distribution). |
 
@@ -111,7 +112,7 @@ default model a consumer reading `catalog.json` should send.
 spark secret set openrouter_api_key       # hidden prompt; never argv
 spark secret set deepseek_api_key
 # one registry entry per provider (remote_model = default model for consumers)
-cat > ~/.local/share/spark/models/openrouter.toml <<'EOF'   # `spark config path` → models
+cat > ~/.local/share/spark/models/openrouter.toml <<'EOF'   # `spark config path` → models; port 8100
 id = "openrouter"
 backend = "openrouter"
 research_status = "manual"
@@ -127,4 +128,3 @@ spark run openrouter                       # prints http://127.0.0.1:<port>/v1
   header check.
 - Model aliasing (`model = "fast"` → the provider id).
 - Upstream connection pooling. Today each request opens one TLS connection.
-- Fixing the relay docs drift (V5).

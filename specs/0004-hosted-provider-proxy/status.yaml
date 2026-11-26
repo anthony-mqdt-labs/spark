@@ -1,7 +1,7 @@
 id: "0004"
 slug: "hosted-provider-proxy"
 title: "Hosted provider proxy — OpenRouter + DeepSeek behind a key-injecting loopback proxy"
-state: "implemented"
+state: "merged"   # on main; P6 live smoke pending
 owner: "operator"
 created: "2026-11-26"
 updated: "2026-11-26"
