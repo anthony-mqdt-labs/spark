@@ -122,9 +122,14 @@ def test_remove_instance_is_idempotent(paths):
 
 def test_heartbeat_rewrites_updated_at(paths):
     pub = InstancePublisher(
-        paths, alias="hb", api_model_id="org/M", backend="mlx_lm",
-        base_url="http://127.0.0.1:8095/v1", port=8095,
-        health_url="http://127.0.0.1:8095/v1/models", session_id="s",
+        paths,
+        alias="hb",
+        api_model_id="org/M",
+        backend="mlx_lm",
+        base_url="http://127.0.0.1:8095/v1",
+        port=8095,
+        health_url="http://127.0.0.1:8095/v1/models",
+        session_id="s",
         heartbeat_s=0.0,
     )
     path = pub.publish()
@@ -134,6 +139,26 @@ def test_heartbeat_rewrites_updated_at(paths):
     assert first <= second
     pub.remove()
     assert not path.exists()
+
+
+def test_publisher_lock_file_is_derived_from_the_alias(paths):
+    pub = InstancePublisher(
+        paths,
+        alias="weird/alias",
+        api_model_id="org/M",
+        backend="mlx_lm",
+        base_url="http://127.0.0.1:8095/v1",
+        port=8095,
+        health_url="http://127.0.0.1:8095/v1/models",
+        session_id="s",
+    )
+    path = pub.publish()
+    assert path.name == "weird--alias.json"
+    lock = paths.run_dir / "locks" / "weird--alias.lock"
+    assert lock.exists()
+    assert [r["model_alias"] for r in read_instances(paths)] == ["weird/alias"]
+    pub.remove()
+    assert not lock.exists()
 
 
 # --- reading defensively --------------------------------------------------------
@@ -211,7 +236,8 @@ def test_supervisor_publishes_then_retracts_the_instance(paths, monkeypatch):
 
     cfg = load_config()
     rt = RuntimeDef(
-        name="fake", detect=DetectSpec(binary="/bin/true"),
+        name="fake",
+        detect=DetectSpec(binary="/bin/true"),
         server=ServerSpec(binary="/bin/true", default_port=8095, ready_timeout_s=1.0),
         requires_local_weights=False,
     )
@@ -220,15 +246,19 @@ def test_supervisor_publishes_then_retracts_the_instance(paths, monkeypatch):
 
     backend = Backend(rt, cfg)
     profile = HostProfile(
-        os="Darwin", arch="arm64", chip="Apple M2", total_memory_bytes=16 * 2**30,
-        cpu_count=8, probed_at=0.0,
+        os="Darwin",
+        arch="arm64",
+        chip="Apple M2",
+        total_memory_bytes=16 * 2**30,
+        cpu_count=8,
+        probed_at=0.0,
         runtimes={"fake": RuntimeStatus(name="fake", available=True)},
     )
     sup = Supervisor(backend, ModelEntry(id="m-live"), cfg, profile, paths, FakeStore())
     save_model(ModelEntry(id="m-live", model_format="mlx"), paths)  # catalog lists the registry
-    sup._spawn = lambda cmd, env: None        # noqa: SLF001
-    sup._terminate = lambda: None             # noqa: SLF001
-    sup._is_healthy = lambda url: True        # noqa: SLF001
+    sup._spawn = lambda cmd, env: None  # noqa: SLF001
+    sup._terminate = lambda: None  # noqa: SLF001
+    sup._is_healthy = lambda url: True  # noqa: SLF001
 
     observed: dict = {}
 

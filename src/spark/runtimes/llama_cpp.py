@@ -42,7 +42,10 @@ class LlamaCppBackend(Backend):
     def build_launch_cmd(self, entry: ModelEntry, host: str, port: int) -> list[str]:
         flag, value = self._model_spec(entry)
         ctx: dict[str, object] = {
-            "model_path": value, "model_id": entry.id, "host": host, "port": port,
+            "model_path": value,
+            "model_id": entry.id,
+            "host": host,
+            "port": port,
         }
         out = [self.rt.server.binary]
         skip = False
@@ -51,8 +54,8 @@ class LlamaCppBackend(Backend):
                 skip = False
                 continue
             if tok == "--model":
-                out += [flag, value]   # swap in the resolved model flag/value
-                skip = True            # drop the original "{model_path}" token
+                out += [flag, value]  # swap in the resolved model flag/value
+                skip = True  # drop the original "{model_path}" token
                 continue
             out.append(_fill(tok, ctx))
         return out + override_flags(entry.launch_overrides)

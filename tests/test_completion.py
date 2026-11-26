@@ -138,9 +138,7 @@ def test_cli_keeps_the_missing_entry_for_forget_with_the_marker(paths, monkeypat
     _seed(paths)
     monkeypatch.setattr("spark.cli.completion.resolve_paths", lambda: paths)
     result = CliRunner().invoke(complete_command, ["models", "forget"])
-    rows = dict(
-        line.split("\t", 1) for line in result.output.splitlines() if "\t" in line
-    )
+    rows = dict(line.split("\t", 1) for line in result.output.splitlines() if "\t" in line)
     assert GONE in rows
     assert MISSING_MARK in rows[GONE]
 

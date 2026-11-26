@@ -25,6 +25,11 @@ Two artifacts fix that, both under the data dir:
     id). That reader requires a bounded regular non-symlink file, which is how
     these are written.
 
+``run/locks/<model>.lock``
+    A kernel flock held by the publisher for its whole lifetime. The kernel
+    releases it on SIGKILL, so a reader can drop a stale manifest without
+    forking ``ps`` and without trusting a recycled PID.
+
 Neither file is a source of truth. The registry owns intentions, the filesystem
 owns reality, and the catalog is a snapshot of the join — regenerable, safe to
 delete, and never consulted by spark's own decisions.
@@ -32,9 +37,9 @@ delete, and never consulted by spark's own decisions.
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
-import subprocess
 import tempfile
 import time
 from datetime import datetime, timezone
@@ -43,7 +48,7 @@ from typing import Any
 
 from .config.paths import SparkPaths
 from .config.schema import ModelEntry, SparkConfig, id_file_stem
-from .errors import HostError
+from .errors import CatalogError
 from .registry.availability import availability_map
 from .telemetry import get_telemetry
 
@@ -53,12 +58,6 @@ SCHEMA_VERSION = 1
 API_CONTRACT = "openai.chat-completions.v1"
 #: Readers bound manifest size; keep well under it (64 KiB in banter's reader).
 MAX_RECORD_BYTES = 64 * 1024
-#: A pid can be reused; treat start times this far apart as a different process.
-PID_START_TOLERANCE_S = 2.0
-#: Keep `ps` calls cheap: a heartbeat may rewrite a manifest every few seconds.
-_PID_START_CACHE_TTL_S = 5.0
-_PID_START_CACHE_MAX = 256
-_PID_START_CACHE: dict[int, tuple[float, float]] = {}
 
 
 class _LastKnownGood(dict[str, Any]):
@@ -72,6 +71,17 @@ class _LastKnownGood(dict[str, Any]):
 def instances_dir(paths: SparkPaths) -> Path:
     """Where live-instance manifests live (created on demand, user-only)."""
     return paths.run_dir / "instances"
+
+
+def instance_lock_path(paths: SparkPaths, alias: str) -> Path:
+    """The kernel lock that proves an instance manifest still has a live owner.
+
+    Sibling to ``instances/`` under ``run/``: the publisher holds an exclusive
+    ``flock`` on this file for its whole lifetime. The kernel drops the lock on
+    *any* exit — including SIGKILL — while the file itself survives, so a reader
+    can tell a dead publisher from a live one without forking ``ps``.
+    """
+    return paths.run_dir / "locks" / f"{id_file_stem(alias)}.lock"
 
 
 def catalog_path(paths: SparkPaths) -> Path:
@@ -95,9 +105,7 @@ def _atomic_write_json(path: Path, payload: dict[str, Any]) -> Path:
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     text = _dump_json(payload)
-    fd, tmp_name = tempfile.mkstemp(
-        dir=path.parent, prefix=f".{path.name}.", suffix=".tmp"
-    )
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     tmp = Path(tmp_name)
     fd_owned = True
     try:
@@ -136,18 +144,14 @@ def instance_record(
     started_at: str,
     updated_at: str | None = None,
     state: str = "ready",
-    pid_started_at: float | None = None,
 ) -> dict[str, Any]:
     """One live-server record, in the shape consumers already validate.
 
     ``api_model_id`` is what a client must put in the request body ``model``
     field — not the spark alias. For a store-backed model that is an absolute
     path, which is exactly why publishing it matters: nothing else tells a
-    consumer what to send.
-
-    ``pid_started_at`` is additive and optional: older consumers ignore it, and
-    manifests written before it existed stay readable. It lets a reader tell a
-    recycled PID from the process that actually published the endpoint.
+    consumer what to send. The field set is intentionally the consumer's v1
+    contract; liveness is proved by the sibling flock file, not by extra fields.
     """
     rec: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
@@ -164,8 +168,6 @@ def instance_record(
         "started_at": started_at,
         "updated_at": updated_at or _now_iso(),
     }
-    if pid_started_at is not None:
-        rec["pid_started_at"] = float(pid_started_at)
     return rec
 
 
@@ -204,47 +206,42 @@ def remove_instance(paths: SparkPaths, alias: str, *, owner_pid: int | None = No
         return
 
 
-def _process_start_epoch(pid: int) -> float | None:
-    """Best-effort process start time (epoch seconds), or None if unknown.
+def _probe_lock(lock: Path) -> bool | None:
+    """Whether a live publisher holds ``lock``.
 
-    ``ps -o lstart=`` is the one portable-enough source on macOS/Linux without
-    adding a dependency. A short cache keeps heartbeats from spawning a process
-    on every rewrite. Never raises: callers must stay able to read the catalog
-    on a host where ``ps`` is restricted or the locale is unfamiliar.
+    ``True``  — held by a live owner (or unreadable; keep prior behaviour).
+    ``False`` — lock file exists but is unowned: the publisher died without
+                removing it (SIGKILL), so its manifest is stale.
+    ``None``  — no lock file: a legacy/hand-written record, use the pid check.
+
+    The probe fd is released on every path, including when it wins the lock.
+    Never raises.
     """
-    now = time.monotonic()
-    cached = _PID_START_CACHE.get(pid)
-    if cached is not None and now - cached[0] < _PID_START_CACHE_TTL_S:
-        return cached[1]
     try:
-        out = subprocess.run(
-            ["ps", "-o", "lstart=", "-p", str(pid)],
-            capture_output=True,
-            text=True,
-            timeout=1.0,
-            check=False,
-            env={**os.environ, "LC_ALL": "C"},
-        )
-    except (OSError, subprocess.SubprocessError):
+        fd = os.open(lock, os.O_RDWR)
+    except FileNotFoundError:
         return None
-    if out.returncode != 0:
-        return None
-    stamp = " ".join(out.stdout.split())
-    if not stamp:
-        return None
+    except OSError:
+        return True  # cannot probe: do not hide a possibly-live server
     try:
-        # lstart is local wall-clock time; timestamp() interprets it as such.
-        epoch = datetime.strptime(stamp, "%a %b %d %H:%M:%S %Y").timestamp()
-    except ValueError:
-        return None
-    if len(_PID_START_CACHE) >= _PID_START_CACHE_MAX:
-        _PID_START_CACHE.clear()
-    _PID_START_CACHE[pid] = (now, epoch)
-    return epoch
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return True  # another owner holds the lock -> live
+        return False  # acquired: the owner is gone -> stale
+    finally:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
-def _pid_alive(pid: object, pid_started_at: object = None) -> bool:
-    """Whether the recorded endpoint is still owned by the process that wrote it."""
+def _pid_alive(pid: object) -> bool:
+    """Legacy fallback for manifests with no lock file: is this pid present?"""
     if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
         return False
     try:
@@ -252,24 +249,25 @@ def _pid_alive(pid: object, pid_started_at: object = None) -> bool:
     except ProcessLookupError:
         return False
     except PermissionError:
-        pass  # exists, owned by someone else
+        return True  # exists, owned by someone else
     except OSError:
         return False
+    return True
 
-    if pid_started_at is None:
-        # Legacy manifest: no start stamp to cross-check, keep prior behaviour.
-        return True
-    try:
-        recorded = float(str(pid_started_at))
-    except (TypeError, ValueError, OverflowError):
-        return True  # malformed optional field is not grounds for hiding a server
-    try:
-        actual = _process_start_epoch(pid)
-    except Exception:  # noqa: BLE001 - a failed lookup must never blind a reader
-        return True
-    if actual is None:
-        return True
-    return abs(actual - recorded) <= PID_START_TOLERANCE_S
+
+def _record_alive(paths: SparkPaths, rec: dict[str, Any]) -> bool:
+    """The flock is authoritative when present; the pid is the legacy fallback."""
+    alias = rec.get("model_alias")
+    if isinstance(alias, str) and alias:
+        try:
+            held = _probe_lock(instance_lock_path(paths, alias))
+        except Exception:  # noqa: BLE001 - one odd record must not blind the rest
+            held = None  # unresolvable alias: fall back to the pid check
+        if held is True:
+            return True
+        if held is False:
+            return False
+    return _pid_alive(rec.get("pid"))
 
 
 def _readable(p: Path) -> bool:
@@ -305,13 +303,13 @@ def read_instances(paths: SparkPaths) -> list[dict[str, Any]]:
         if not (isinstance(rec, dict) and rec.get("schema_version") == SCHEMA_VERSION):
             continue
         try:
-            live = _pid_alive(rec.get("pid"), rec.get("pid_started_at"))
+            live = _record_alive(paths, rec)
         except Exception:  # noqa: BLE001 - one odd record must not blind the rest
             live = False
         if not live:
-            # Left by a spark that was SIGKILLed, or by an earlier process that
-            # held this pid (the id was recycled). Publishing either would
-            # advertise a dead endpoint.
+            # Left by a spark that died without retracting it (SIGKILL frees the
+            # flock but leaves the file). Publishing it would advertise a dead
+            # endpoint.
             continue
         out.append(rec)
     return out
@@ -377,7 +375,9 @@ def build_catalog(
     try:
         from .inventory import build_inventory
 
-        inv = build_inventory(paths, config=config, with_bytes=False)
+        # Reuse this build's registry/availability join instead of computing a
+        # second map (and rewalking disk) just to list discovered weights.
+        inv = build_inventory(paths, config=config, with_bytes=False, entries=entries, avail=avail)
         discovered = [
             {
                 "id": m.display_id,
@@ -394,14 +394,16 @@ def build_catalog(
         # [] would tell the Rust consumer the disk has no servable weights when
         # we simply failed to look, and would erase the cached-repo count.
         get_telemetry().warn(
-            "catalog", "inventory_failed",
-            error_type=type(exc).__name__, error=repr(exc),
+            "catalog",
+            "inventory_failed",
+            error_type=type(exc).__name__,
+            error=repr(exc),
             data_dir=str(paths.data_dir),
         )
         previous = _last_known_good(paths)
         if previous is not None:
             return previous
-        raise HostError(
+        raise CatalogError(
             "Cannot publish the catalog: the model inventory scan failed and "
             "there is no last-known-good catalog to reuse",
             remediation=[
@@ -460,8 +462,11 @@ def safe_write_catalog(
         return write_catalog(paths, config)
     except Exception as exc:  # noqa: BLE001 - courtesy, never a gate
         get_telemetry().warn(
-            component, event,
-            error_type=type(exc).__name__, error=repr(exc), **context,
+            component,
+            event,
+            error_type=type(exc).__name__,
+            error=repr(exc),
+            **context,
         )
         return None
 
@@ -502,8 +507,28 @@ class InstancePublisher:
         self.heartbeat_s = heartbeat_s
         self.started_at = started_at_stamp()
         self._next_beat = time.monotonic() + heartbeat_s
+        self._lock_path = instance_lock_path(paths, alias)
+        self._lock_fd: int | None = None
+
+    def _acquire_lock(self) -> None:
+        """Hold an exclusive flock for the publisher's lifetime (no subprocess)."""
+        if self._lock_fd is not None:
+            return  # heartbeats keep the same lock, they do not reacquire
+        self._lock_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.chmod(self._lock_path.parent, 0o700)
+        except OSError:
+            pass
+        fd = os.open(self._lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            raise  # another live publisher owns this alias
+        self._lock_fd = fd
 
     def publish(self) -> Path:
+        self._acquire_lock()
         rec = instance_record(
             alias=self.alias,
             api_model_id=self.api_model_id,
@@ -514,7 +539,6 @@ class InstancePublisher:
             pid=os.getpid(),
             session_id=self.session_id,
             started_at=self.started_at,
-            pid_started_at=_process_start_epoch(os.getpid()),
         )
         return publish_instance(self.paths, rec)
 
@@ -526,4 +550,18 @@ class InstancePublisher:
         self.publish()
 
     def remove(self) -> None:
+        if self._lock_fd is not None:
+            try:
+                fcntl.flock(self._lock_fd, fcntl.LOCK_UN)
+            except OSError:
+                pass
+            try:
+                os.close(self._lock_fd)
+            except OSError:
+                pass
+            self._lock_fd = None
+        try:
+            self._lock_path.unlink()
+        except OSError:
+            pass
         remove_instance(self.paths, self.alias, owner_pid=os.getpid())

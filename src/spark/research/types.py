@@ -4,68 +4,12 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ..errors import SparkError
-
-
-_DEFAULT_REMEDIATION: dict[str, list[str]] = {
-    "NET_RESEARCH": [
-        "Check that the research agent CLI is installed and authenticated.",
-        "Inspect the research events under the data dir's logs/ for the provider error.",
-        "Or import a config manually: spark config import <model> < result.json",
-    ],
-    "NET_RESEARCH_UNAVAILABLE": [
-        "Install/enable an agent CLI (e.g. `claude`).",
-        "Or import a config manually: spark config import <model> < result.json",
-    ],
-    "NET_RESEARCH_EXHAUSTED": [
-        "Inspect the research events under the data dir's logs/ for per-provider errors.",
-        "Import config manually: spark config import <model> < result.json",
-    ],
-}
-
-
-class ResearchError(SparkError):
-    """Base for research-chain failures: every one tells the operator what next."""
-
-    code = "NET_RESEARCH"
-
-    def __init__(
-        self,
-        message: str,
-        *,
-        remediation: list[str] | None = None,
-        context: dict[str, object] | None = None,
-        cause: BaseException | None = None,
-        code: str | None = None,
-    ) -> None:
-        effective_code = code or self.code
-        super().__init__(
-            message,
-            remediation=remediation or list(
-                _DEFAULT_REMEDIATION.get(effective_code, _DEFAULT_REMEDIATION["NET_RESEARCH"])
-            ),
-            context=context,
-            cause=cause,
-            code=code,
-        )
-
-
-class ResearchProviderError(ResearchError):
-    """A provider process could not run or exited non-zero."""
-
-    code = "NET_RESEARCH"
-
-
-class ResearchUnavailableError(ResearchError):
-    """No provider in the fallback chain was available."""
-
-    code = "NET_RESEARCH_UNAVAILABLE"
-
-
-class ResearchExhaustedError(ResearchError):
-    """Every available provider failed; staged research is unchanged."""
-
-    code = "NET_RESEARCH_EXHAUSTED"
+from ..errors import (  # re-exports: these errors now live in errors.py
+    ResearchError as ResearchError,
+    ResearchExhaustedError as ResearchExhaustedError,
+    ResearchProviderError as ResearchProviderError,
+    ResearchUnavailableError as ResearchUnavailableError,
+)
 
 
 class _Strict(BaseModel):
@@ -78,7 +22,7 @@ class ResearchRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     hf_repo: str
-    host_summary: dict          # chip, memory, cores, arch — NEVER secrets
+    host_summary: dict  # chip, memory, cores, arch — NEVER secrets
     runtime_names: list[str]
     model_card_excerpt: str = ""
 

@@ -8,6 +8,7 @@ from spark.config.loader import load_config
 from spark.config.schema import ModelEntry
 from spark.errors import BackendUnavailableError, ConfigError
 from spark.runtimes import get_backend, select_backend_for
+from spark.runtimes.base import Backend
 
 
 def test_mlx_launch_cmd_fills_placeholders():
@@ -27,6 +28,17 @@ def test_mlx_launch_cmd_proxied_by_default():
     test_filter_proxy.py)."""
     cfg = load_config()
     assert cfg.runtimes["mlx_lm"].server.filter_models is True
+
+
+def test_only_the_filter_proxy_backend_accepts_a_reserved_fd(config):
+    """spark can close the port TOCTOU only for the child it launches itself."""
+    assert get_backend("mlx_lm", config).accepts_reserved_fd is True
+
+    direct = load_config()
+    direct.runtimes["mlx_lm"].server.filter_models = False
+    assert get_backend("mlx_lm", direct).accepts_reserved_fd is False
+    assert get_backend("llama_cpp", direct).accepts_reserved_fd is False
+    assert Backend(direct.runtimes["llama_cpp"], direct).accepts_reserved_fd is False
 
 
 def test_llama_cmd_includes_metal_offload_local_gguf(tmp_path):
@@ -62,8 +74,9 @@ def test_llama_raises_without_file_or_repo():
 def test_launch_overrides_appended_as_flags():
     cfg = load_config()
     b = get_backend("mlx_lm", cfg)
-    entry = ModelEntry(id="m", path="/m",
-                       launch_overrides={"--max-tokens": "4096", "--trust-remote-code": ""})
+    entry = ModelEntry(
+        id="m", path="/m", launch_overrides={"--max-tokens": "4096", "--trust-remote-code": ""}
+    )
     cmd = b.build_launch_cmd(entry, "127.0.0.1", 8080)
     assert cmd[-3:] == ["--max-tokens", "4096", "--trust-remote-code"] or (
         "--max-tokens" in cmd and "4096" in cmd and "--trust-remote-code" in cmd
@@ -73,8 +86,9 @@ def test_launch_overrides_appended_as_flags():
 def test_llama_overrides_appended_as_flags():
     cfg = load_config()
     b = get_backend("llama_cpp", cfg)
-    entry = ModelEntry(id="g", hf_repo="org/R-GGUF", model_format="gguf",
-                       launch_overrides={"-c": "8192"})
+    entry = ModelEntry(
+        id="g", hf_repo="org/R-GGUF", model_format="gguf", launch_overrides={"-c": "8192"}
+    )
     cmd = b.build_launch_cmd(entry, "127.0.0.1", 8082)
     assert cmd[-2:] == ["-c", "8192"]
 
@@ -165,8 +179,9 @@ def test_vlm_model_routes_to_mlx_vlm():
 
 def test_openai_base_url():
     cfg = load_config()
-    assert get_backend("mlx_lm", cfg).openai_base_url("127.0.0.1", 8080) == \
-        "http://127.0.0.1:8080/v1"
+    assert (
+        get_backend("mlx_lm", cfg).openai_base_url("127.0.0.1", 8080) == "http://127.0.0.1:8080/v1"
+    )
 
 
 def test_ollama_attaches():

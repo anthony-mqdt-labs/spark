@@ -20,17 +20,21 @@ def _telemetry(tmp_path):
 def _rt() -> RuntimeDef:
     return RuntimeDef(
         name="mlx_vlm",
-        detect=DetectSpec(
-            binary="mlx_vlm.server", python_requires=["torch", "torchvision"]
-        ),
+        detect=DetectSpec(binary="mlx_vlm.server", python_requires=["torch", "torchvision"]),
         server=ServerSpec(binary="mlx_vlm.server"),
         install_hint="uv tool install mlx-vlm",
     )
 
 
 ARGV = [
-    "uv", "tool", "install", "mlx-vlm",
-    "--with", "torch", "--with", "torchvision",
+    "uv",
+    "tool",
+    "install",
+    "mlx-vlm",
+    "--with",
+    "torch",
+    "--with",
+    "torchvision",
 ]
 
 
@@ -42,17 +46,13 @@ def test_fix_success_when_installer_ok_and_deps_appear(monkeypatch):
         return SimpleNamespace(returncode=0)
 
     monkeypatch.setattr(subprocess, "run", fake_run)
-    monkeypatch.setattr(
-        "spark.cli.doctor.missing_python_deps", lambda binary, reqs: []
-    )
+    monkeypatch.setattr("spark.cli.doctor.missing_python_deps", lambda binary, reqs: [])
     assert _fix_python_deps(_rt(), ["torch", "torchvision"], list(ARGV)) is True
     assert calls == [ARGV]
 
 
 def test_fix_fails_on_installer_nonzero_exit(monkeypatch):
-    monkeypatch.setattr(
-        subprocess, "run", lambda argv, check=False: SimpleNamespace(returncode=2)
-    )
+    monkeypatch.setattr(subprocess, "run", lambda argv, check=False: SimpleNamespace(returncode=2))
     monkeypatch.setattr(
         "spark.cli.doctor.missing_python_deps",
         lambda *a: pytest.fail("must not re-verify after a failed install"),
@@ -62,9 +62,7 @@ def test_fix_fails_on_installer_nonzero_exit(monkeypatch):
 
 def test_fix_fails_when_deps_still_missing_after_install(monkeypatch):
     # e.g. a wrong module:pip mapping — installer succeeds, import still fails.
-    monkeypatch.setattr(
-        subprocess, "run", lambda argv, check=False: SimpleNamespace(returncode=0)
-    )
+    monkeypatch.setattr(subprocess, "run", lambda argv, check=False: SimpleNamespace(returncode=0))
     monkeypatch.setattr(
         "spark.cli.doctor.missing_python_deps", lambda binary, reqs: ["torchvision"]
     )

@@ -14,17 +14,23 @@ from .render import console, render_server_log
 
 @click.command(name="run")
 @click.argument("model")
-@click.option("--backend", "backend_override", default=None,
-              help="Force a specific runtime backend.")
-@click.option("--dflash", is_flag=True,
-              help="Enable the model's DFlash speculative-decoding profile (opt-in; "
-                   "needs a [dflash] section in the model's registry entry).")
-@click.option("--force", is_flag=True,
-              help="Bypass the memory gate, the missing-weights refusal, and the "
-                   "already-serving refusal (the fetch disk floor still applies).")
+@click.option(
+    "--backend", "backend_override", default=None, help="Force a specific runtime backend."
+)
+@click.option(
+    "--dflash",
+    is_flag=True,
+    help="Enable the model's DFlash speculative-decoding profile (opt-in; "
+    "needs a [dflash] section in the model's registry entry).",
+)
+@click.option(
+    "--force",
+    is_flag=True,
+    help="Bypass the memory gate, the missing-weights refusal, and the "
+    "already-serving refusal (the fetch disk floor still applies).",
+)
 @click.option("--reprobe", is_flag=True, help="Re-probe host before launching.")
-def run_command(model: str, backend_override: str | None, dflash: bool,
-                force: bool, reprobe: bool):
+def run_command(model: str, backend_override: str | None, dflash: bool, force: bool, reprobe: bool):
     """Launch the best-optimized inference server for MODEL."""
     ctx = build_context()
     from ..errors import ModelNotFoundError
@@ -69,7 +75,10 @@ def run_command(model: str, backend_override: str | None, dflash: bool,
         entry = entry.with_dflash()
 
     profile = load_or_probe(
-        ctx.config, ctx.paths.host_profile_file, force=reprobe
+        ctx.config,
+        ctx.paths.host_profile_file,
+        max_age_s=ctx.config.probe.max_age_s,
+        force=reprobe,
     )
     available = profile.available_runtimes
     if not available:
@@ -104,8 +113,13 @@ def run_command(model: str, backend_override: str | None, dflash: bool,
 
     backend = get_backend(backend_name, ctx.config)
     ctx.telemetry.info(
-        "cli", "run_dispatch", model=entry.id, backend=backend_name, dflash=dflash,
-        pinned_backend=entry.backend, dropped_overrides=dropped,
+        "cli",
+        "run_dispatch",
+        model=entry.id,
+        backend=backend_name,
+        dflash=dflash,
+        pinned_backend=entry.backend,
+        dropped_overrides=dropped,
     )
 
     label = backend_name + (" · dflash" if dflash else "")
@@ -113,9 +127,7 @@ def run_command(model: str, backend_override: str | None, dflash: bool,
     def _on_ready(info) -> None:
         _print_ready(entry.id, label, info)
 
-    sup = Supervisor(
-        backend, entry, ctx.config, profile, ctx.paths, ctx.secrets, force=force
-    )
+    sup = Supervisor(backend, entry, ctx.config, profile, ctx.paths, ctx.secrets, force=force)
     try:
         result = sup.run(on_ready=_on_ready)
     except SparkError:
@@ -132,8 +144,10 @@ def _print_ready(model_id: str, label: str, info) -> None:
 
     ver = spark_version()
     console.print()
-    console.print(f"  [bold green]spark[/bold green] [dim]v{ver}[/dim]  "
-                  f"ready in [bold]{info.elapsed_s:.1f}s[/bold]")
+    console.print(
+        f"  [bold green]spark[/bold green] [dim]v{ver}[/dim]  "
+        f"ready in [bold]{info.elapsed_s:.1f}s[/bold]"
+    )
     console.print()
     console.print(f"  [green]➜[/green]  [bold]Local:[/bold]   [cyan]{info.base_url}[/cyan]")
     console.print(f"  [green]➜[/green]  [bold]Model:[/bold]   {model_id} [dim]({label})[/dim]")

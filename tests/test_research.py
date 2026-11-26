@@ -3,6 +3,7 @@ from __future__ import annotations
 import sys
 
 import pytest
+from pydantic import ValidationError
 
 from spark.config.loader import load_config
 from spark.config.schema import ModelEntry, ResearchProviderDef
@@ -12,7 +13,7 @@ from spark.research.guard import SecretLeakError, assert_no_secrets
 from spark.research.providers import CliAgentProvider, ResearchProvider, _extract_json
 from spark.research.staging import apply_output_to_entry, load_staged, stage
 from spark.research.types import ResearchOutput, ResearchRequest
-from spark.telemetry import register_secret_value
+from spark.redaction import register_secret_value
 
 
 # --- guard ---------------------------------------------------------------------
@@ -68,8 +69,7 @@ class _Fake(ResearchProvider):
 
 
 def _req():
-    return ResearchRequest(hf_repo="org/m", host_summary={"chip": "M2"},
-                           runtime_names=["mlx_lm"])
+    return ResearchRequest(hf_repo="org/m", host_summary={"chip": "M2"}, runtime_names=["mlx_lm"])
 
 
 def test_chain_returns_first_success():
@@ -101,19 +101,23 @@ def test_chain_all_fail_raises_exhausted():
 
 # --- CLI provider over a real subprocess (no LLM) ------------------------------
 def test_cli_provider_parses_subprocess_json():
-    script = ("import sys; sys.stdin.read(); "
-              "print('{\"recommended_backend\":\"mlx_lm\","
-              "\"per_runtime\":{\"mlx_lm\":{\"quant\":\"q4\"}}}')")
-    defn = ResearchProviderDef(name="fake", command=[sys.executable, "-c", script],
-                               prompt_via="stdin", parse="raw_json")
+    script = (
+        "import sys; sys.stdin.read(); "
+        'print(\'{"recommended_backend":"mlx_lm",'
+        '"per_runtime":{"mlx_lm":{"quant":"q4"}}}\')'
+    )
+    defn = ResearchProviderDef(
+        name="fake", command=[sys.executable, "-c", script], prompt_via="stdin", parse="raw_json"
+    )
     out = CliAgentProvider(defn).research(_req())
     assert out.recommended_backend == "mlx_lm"
     assert out.per_runtime["mlx_lm"].quant == "q4"
 
 
 def test_cli_provider_unavailable_when_binary_missing():
-    defn = ResearchProviderDef(name="x", detect_binary="definitely-not-real-xyz",
-                               command=["definitely-not-real-xyz"])
+    defn = ResearchProviderDef(
+        name="x", detect_binary="definitely-not-real-xyz", command=["definitely-not-real-xyz"]
+    )
     assert CliAgentProvider(defn).is_available() is False
 
 
@@ -121,45 +125,44 @@ def test_cli_provider_unavailable_when_binary_missing():
 def test_launch_overrides_coerce_llm_scalars():
     # Regression: hermes returned bare JSON numbers for numeric flags
     # (2026-07-14, NET_RESEARCH_EXHAUSTED on a semantically valid answer).
-    out = ResearchOutput.model_validate({
-        "recommended_backend": "mlx_vlm",
-        "per_runtime": {
-            "mlx_vlm": {"quant": "q4", "launch_overrides": {"max_tokens": 4096}},
-            "ollama": {"launch_overrides": {"num_ctx": 32768, "f16": True}},
-            "omlx": {"launch_overrides": {"temp": 0.8, "already": "str"}},
-        },
-    })
+    out = ResearchOutput.model_validate(
+        {
+            "recommended_backend": "mlx_vlm",
+            "per_runtime": {
+                "mlx_vlm": {"quant": "q4", "launch_overrides": {"max_tokens": 4096}},
+                "ollama": {"launch_overrides": {"num_ctx": 32768, "f16": True}},
+                "omlx": {"launch_overrides": {"temp": 0.8, "already": "str"}},
+            },
+        }
+    )
     assert out.per_runtime["mlx_vlm"].launch_overrides == {"max_tokens": "4096"}
-    assert out.per_runtime["ollama"].launch_overrides == {
-        "num_ctx": "32768", "f16": "true"
-    }
-    assert out.per_runtime["omlx"].launch_overrides == {
-        "temp": "0.8", "already": "str"
-    }
+    assert out.per_runtime["ollama"].launch_overrides == {"num_ctx": "32768", "f16": "true"}
+    assert out.per_runtime["omlx"].launch_overrides == {"temp": "0.8", "already": "str"}
 
 
 def test_launch_overrides_still_reject_non_scalars():
-    with pytest.raises(Exception):
-        ResearchOutput.model_validate({
-            "recommended_backend": "mlx_lm",
-            "per_runtime": {
-                "mlx_lm": {"launch_overrides": {"bad": ["a", "list"]}},
-            },
-        })
+    with pytest.raises(ValidationError):
+        ResearchOutput.model_validate(
+            {
+                "recommended_backend": "mlx_lm",
+                "per_runtime": {
+                    "mlx_lm": {"launch_overrides": {"bad": ["a", "list"]}},
+                },
+            }
+        )
 
 
 def test_cli_provider_logs_output_sample_on_parse_failure(tmp_path):
     from spark.telemetry import init_telemetry
 
     init_telemetry(tmp_path / "logs", session_id="test-sample")
-    script = 'import sys; sys.stdin.read(); print(\'{"unterminated": \')'
-    defn = ResearchProviderDef(name="fake", command=[sys.executable, "-c", script],
-                               prompt_via="stdin", parse="raw_json")
+    script = "import sys; sys.stdin.read(); print('{\"unterminated\": ')"
+    defn = ResearchProviderDef(
+        name="fake", command=[sys.executable, "-c", script], prompt_via="stdin", parse="raw_json"
+    )
     with pytest.raises(ValueError, match="unterminated"):
         CliAgentProvider(defn).research(_req())
-    blob = "".join(
-        p.read_text() for p in (tmp_path / "logs").rglob("*.jsonl")
-    )
+    blob = "".join(p.read_text() for p in (tmp_path / "logs").rglob("*.jsonl"))
     assert "provider_output_unparseable" in blob
     assert '{\\"unterminated\\":' in blob  # the raw sample survived into the log
 
@@ -168,8 +171,13 @@ def test_cli_provider_logs_output_sample_on_parse_failure(tmp_path):
 def test_stage_load_and_apply(paths):
     out = ResearchOutput(
         recommended_backend="llama_cpp",
-        per_runtime={"llama_cpp": {"quant": "q4", "context_length": 8192,
-                                   "launch_overrides": {"ctx": "8192"}}},
+        per_runtime={
+            "llama_cpp": {
+                "quant": "q4",
+                "context_length": 8192,
+                "launch_overrides": {"ctx": "8192"},
+            }
+        },
     )
     stage(paths, "m", out, provider="claude", hf_repo="org/m", host_summary={"chip": "M2"})
     doc = load_staged(paths, "m")
@@ -191,8 +199,14 @@ def test_built_prompt_has_no_secrets(monkeypatch):
 
     monkeypatch.setattr(P, "fetch_model_card", lambda repo, n: "A small instruct model.")
     cfg = load_config()
-    prof = HostProfile(os="Darwin", arch="arm64", chip="Apple M2",
-                       total_memory_bytes=16 * 2**30, cpu_count=8, probed_at=0.0)
+    prof = HostProfile(
+        os="Darwin",
+        arch="arm64",
+        chip="Apple M2",
+        total_memory_bytes=16 * 2**30,
+        cpu_count=8,
+        probed_at=0.0,
+    )
     req = P.build_request("org/Model", prof, cfg, ["mlx_lm", "llama_cpp"])
     text = P.build_prompt(req)
     assert "org/Model" in text and "mlx_lm" in text

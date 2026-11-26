@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import json
 
-from spark.telemetry import init_telemetry, register_secret_value
+from spark.redaction import register_secret_value
+from spark.telemetry import init_telemetry
 
 
 def test_secret_value_is_redacted_in_logs(tmp_path):

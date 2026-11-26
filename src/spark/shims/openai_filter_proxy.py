@@ -36,6 +36,7 @@ import http.client
 import json
 import os
 import signal
+import socket
 import subprocess
 import sys
 import threading
@@ -55,8 +56,14 @@ MAX_BODY_BYTES = 64 * 2**20
 ALLOWED_IDS_TTL_S = 30.0
 
 _HOP_HEADERS = {
-    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
-    "te", "trailer", "transfer-encoding", "upgrade",
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
 }
 
 
@@ -64,18 +71,25 @@ def _parse_args(argv=None):
     p = argparse.ArgumentParser(description="Filter /v1/models to spark's roster.")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, required=True, help="Published port.")
-    p.add_argument("--upstream", required=True,
-                   help="Backend base URL, e.g. http://127.0.0.1:8099.")
-    p.add_argument("--served-id", default="",
-                   help="API id of the launched model (listed first).")
+    p.add_argument(
+        "--upstream", required=True, help="Backend base URL, e.g. http://127.0.0.1:8099."
+    )
+    p.add_argument("--served-id", default="", help="API id of the launched model (listed first).")
     p.add_argument("--health-path", default="/v1/models")
     p.add_argument("--ready-timeout-s", type=float, default=240.0)
-    p.add_argument("--unhealthy-exit-after", type=int, default=3,
-                   help="Monitor exits after this many consecutive failed checks.")
-    p.add_argument("--monitor-interval-s", type=float, default=5.0,
-                   help="Seconds between backend health checks.")
-    p.add_argument("backend", nargs=argparse.REMAINDER,
-                   help="Backend argv after `--`.")
+    p.add_argument(
+        "--unhealthy-exit-after",
+        type=int,
+        default=3,
+        help="Monitor exits after this many consecutive failed checks.",
+    )
+    p.add_argument(
+        "--monitor-interval-s",
+        type=float,
+        default=5.0,
+        help="Seconds between backend health checks.",
+    )
+    p.add_argument("backend", nargs=argparse.REMAINDER, help="Backend argv after `--`.")
     args = p.parse_args(argv)
     if args.backend and args.backend[0] == "--":
         args.backend = args.backend[1:]
@@ -133,8 +147,7 @@ def _cached_ids() -> list[str]:
     if ids is None or time.monotonic() - _MODELS_CACHE["built_at"] >= ALLOWED_IDS_TTL_S:
         with _MODELS_LOCK:
             ids = _MODELS_CACHE["ids"]
-            if (ids is None
-                    or time.monotonic() - _MODELS_CACHE["built_at"] >= ALLOWED_IDS_TTL_S):
+            if ids is None or time.monotonic() - _MODELS_CACHE["built_at"] >= ALLOWED_IDS_TTL_S:
                 ids = _refresh_allowed_ids()
     return ids
 
@@ -149,10 +162,22 @@ def models_payload() -> dict:
 _STATE: dict = {}
 
 
+def _upstream_host(parts: urllib.parse.ParseResult) -> str:
+    """The upstream hostname, or a loud, actionable error if the URL has none."""
+    host = parts.hostname
+    if not host:
+        raise ValueError(
+            f"upstream URL {parts.geturl()!r} has no host; "
+            "pass --upstream http://127.0.0.1:<port> (the backend's bind address)."
+        )
+    return host
+
+
 def _upstream(parts: urllib.parse.ParseResult):
     if parts.scheme != "http":
         raise ValueError(f"only http upstreams supported: {parts.geturl()}")
-    return http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=None)
+    host = _upstream_host(parts)
+    return http.client.HTTPConnection(host, parts.port or 80, timeout=None)
 
 
 def _is_models_request(handler: BaseHTTPRequestHandler) -> bool:
@@ -163,8 +188,8 @@ def _is_models_request(handler: BaseHTTPRequestHandler) -> bool:
 class _Handler(BaseHTTPRequestHandler):
     server_version = "spark-filter-proxy/1"
 
-    def log_message(self, fmt, *args):
-        sys.stderr.write(f"[proxy] {self.address_string()} {fmt % args}\n")
+    def log_message(self, format, *args):  # noqa: A002 - stdlib signature
+        sys.stderr.write(f"[proxy] {self.address_string()} {format % args}\n")
 
     def _send_json(self, code: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
@@ -193,8 +218,7 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json(411, {"error": "chunked request bodies are not supported"})
             return
         body = self.rfile.read(length) if length else None
-        fwd = {k: v for k, v in self.headers.items()
-               if k.lower() not in _HOP_HEADERS}
+        fwd = {k: v for k, v in self.headers.items() if k.lower() not in _HOP_HEADERS}
         conn = None
         try:
             conn = _upstream(_STATE["upstream"])
@@ -237,6 +261,25 @@ def _spawn_backend(argv: list[str]) -> "subprocess.Popen[bytes]":
     return subprocess.Popen(argv)
 
 
+def _adopted_server(fd: int, host: str, port: int) -> ThreadingHTTPServer:
+    """Serve on spark's pre-bound listening socket instead of binding our own.
+
+    ``SPARK_LISTEN_FD`` arrives via ``pass_fds`` from the supervisor, which held
+    the port from preflight to exec. Adopting that fd means no second bind: a
+    same-user process cannot take the port in the gap. Without the env var the
+    ordinary bind path below stays unchanged (back-compat).
+    """
+
+    class _AdoptedServer(ThreadingHTTPServer):
+        def server_bind(self) -> None:
+            self.socket = socket.socket(fileno=fd)  # takes over the inherited fd
+            self.server_address = (host, port)
+            self.server_name = host
+            self.server_port = port
+
+    return _AdoptedServer((host, port), _Handler)
+
+
 def _probe_health(parts: urllib.parse.ParseResult, health_path: str) -> bool:
     """One health poll: drain the body and close both response and connection.
 
@@ -245,9 +288,8 @@ def _probe_health(parts: urllib.parse.ParseResult, health_path: str) -> bool:
     runs out. Reading the body also lets the socket close cleanly instead of
     stranding unread bytes on a half-open connection.
     """
-    with contextlib.closing(
-        http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=5)
-    ) as conn:
+    host = _upstream_host(parts)
+    with contextlib.closing(http.client.HTTPConnection(host, parts.port or 80, timeout=5)) as conn:
         conn.request("GET", health_path)
         with contextlib.closing(conn.getresponse()) as resp:
             resp.read()
@@ -281,16 +323,24 @@ def _terminate_child(child: "subprocess.Popen[bytes]") -> None:
             pass
 
 
-def _monitor(child: "subprocess.Popen[bytes]", upstream: str, health_path: str,
-             max_failures: int, stop: threading.Event,
-             interval_s: float = 5.0) -> None:
+def _monitor(
+    child: "subprocess.Popen[bytes]",
+    upstream: str,
+    health_path: str,
+    max_failures: int,
+    stop: threading.Event,
+    interval_s: float = 5.0,
+) -> None:
     """Exit the proxy when the backend is gone: supervisor restarts the unit."""
     failures = 0
     parts = urllib.parse.urlparse(upstream)
     while not stop.wait(interval_s):
         if child.poll() is not None:
-            print(f"[proxy] backend exited (code {child.returncode}); exiting",
-                  file=sys.stderr, flush=True)
+            print(
+                f"[proxy] backend exited (code {child.returncode}); exiting",
+                file=sys.stderr,
+                flush=True,
+            )
             os._exit(1)
         try:
             ok = _probe_health(parts, health_path)
@@ -310,12 +360,14 @@ def main(argv=None) -> int:
         served_id=args.served_id,
         upstream_ready=False,
     )
+    # Consume the handoff: the fd belongs to this proxy, not to the backend we
+    # spawn below (which would otherwise inherit a stale env value).
+    listen_fd = os.environ.pop("SPARK_LISTEN_FD", None)
     child = _spawn_backend(args.backend)
     stop = threading.Event()
 
     def _shutdown(signum, _frame):
-        print(f"[proxy] signal {signum}; terminating backend", file=sys.stderr,
-              flush=True)
+        print(f"[proxy] signal {signum}; terminating backend", file=sys.stderr, flush=True)
         stop.set()
         _terminate_child(child)
         raise SystemExit(0)
@@ -327,20 +379,31 @@ def main(argv=None) -> int:
             pass
 
     # Bind the published port *now*, not after the model loads: the supervisor
-    # picked it as free seconds ago, and a load can take minutes. Until the
-    # backend is healthy, /v1/models answers 503 so the supervisor keeps waiting.
+    # picked it as free seconds ago, and a load can take minutes. When spark
+    # reserved the port it also passed the listening fd; adopt it rather than
+    # binding again. Until the backend is healthy, /v1/models answers 503 so the
+    # supervisor keeps waiting.
     try:
-        server = ThreadingHTTPServer((args.host, args.port), _Handler)
-    except OSError as exc:
-        print(f"[proxy] FATAL: cannot bind {args.host}:{args.port}: {exc}",
-              file=sys.stderr, flush=True)
+        if listen_fd is None:
+            server = ThreadingHTTPServer((args.host, args.port), _Handler)
+        else:
+            server = _adopted_server(int(listen_fd), args.host, args.port)
+    except (OSError, ValueError) as exc:
+        print(
+            f"[proxy] FATAL: cannot listen on {args.host}:{args.port}: {exc}",
+            file=sys.stderr,
+            flush=True,
+        )
         _terminate_child(child)
         return 1
     server.daemon_threads = True
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-    print(f"[proxy] listening on http://{args.host}:{args.port} "
-          f"(upstream {args.upstream}); waiting for backend{args.health_path} …",
-          flush=True)
+    serve_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    serve_thread.start()
+    print(
+        f"[proxy] listening on http://{args.host}:{args.port} "
+        f"(upstream {args.upstream}); waiting for backend{args.health_path} …",
+        flush=True,
+    )
     try:
         if not _wait_ready(args.upstream, args.health_path, args.ready_timeout_s):
             print("[proxy] FATAL: backend never became ready", file=sys.stderr)
@@ -350,16 +413,30 @@ def main(argv=None) -> int:
         # lets handler threads answer /v1/models.
         _refresh_allowed_ids(args.served_id)
         _STATE["upstream_ready"] = True
-        threading.Thread(target=_monitor,
-                         args=(child, args.upstream, args.health_path,
-                               args.unhealthy_exit_after, stop,
-                               args.monitor_interval_s),
-                         daemon=True).start()
+        threading.Thread(
+            target=_monitor,
+            args=(
+                child,
+                args.upstream,
+                args.health_path,
+                args.unhealthy_exit_after,
+                stop,
+                args.monitor_interval_s,
+            ),
+            daemon=True,
+        ).start()
         while not stop.wait(1.0):  # timed: the signal handler stays responsive
             if child.poll() is not None:
                 return 1  # monitor normally catches this first
     except KeyboardInterrupt:
         _terminate_child(child)
+    finally:
+        # Close the adopted fd (or a normal listener) on every exit path: a
+        # supervisor restart must be able to take the same port again.
+        if serve_thread.is_alive():
+            server.shutdown()
+        serve_thread.join(timeout=1.0)
+        server.server_close()
     return 0
 
 

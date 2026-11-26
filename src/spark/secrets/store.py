@@ -66,8 +66,7 @@ class SecretStore(ABC):
         """List secret *names* only — never values."""
 
     @abstractmethod
-    def exists(self, name: str) -> bool:
-        ...
+    def exists(self, name: str) -> bool: ...
 
     @abstractmethod
     def is_available(self) -> bool:
@@ -92,9 +91,12 @@ class SecretStore(ABC):
                 # auth need) — but leave a trace naming the var, never the value,
                 # or a gated 401 three layers down is undiagnosable.
                 get_telemetry().warn(
-                    "secrets", "secret_resolve_failed",
-                    env_var=env_var, vault_entry=secret_name,
-                    error_type=type(exc).__name__, backend=self.backend_name,
+                    "secrets",
+                    "secret_resolve_failed",
+                    env_var=env_var,
+                    vault_entry=secret_name,
+                    error_type=type(exc).__name__,
+                    backend=self.backend_name,
                 )
                 continue
         return out

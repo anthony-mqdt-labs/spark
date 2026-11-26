@@ -1,3 +1,6 @@
+# pyright: reportMissingImports=false
+# MLX, mlx_lm, jinja2 and the vendor pack's modules all live in the foreign
+# tool interpreter that runs this shim, never in spark's venv (D1).
 """OpenAI-compatible serving shim for PrismML Hadamard-packed checkpoints.
 
 Runs as a *child process* under the mlx-lm tool interpreter
@@ -64,8 +67,11 @@ def _load(pack: Path, model_id: str) -> None:
         t0 = time.monotonic()
         print(f"[prism] loading v1 pack {pack} …", flush=True)
         model, config = load_model(pack)
-        print(f"[prism] weights resident ({time.monotonic() - t0:.1f}s, "
-              f"{len(config.get('modules', []))} packed modules)", flush=True)
+        print(
+            f"[prism] weights resident ({time.monotonic() - t0:.1f}s, "
+            f"{len(config.get('modules', []))} packed modules)",
+            flush=True,
+        )
     elif schema == 2:
         model = _load_v2(pack, cfg)
     else:
@@ -91,14 +97,19 @@ def _load(pack: Path, model_id: str) -> None:
         eos = None
 
     _STATE.update(
-        model=model, tokenizer=tokenizer, template=template,
-        bos=bos, eos=eos, model_id=model_id or pack.name,
+        model=model,
+        tokenizer=tokenizer,
+        template=template,
+        bos=bos,
+        eos=eos,
+        model_id=model_id or pack.name,
         lock=threading.Lock(),
     )
     print("[prism] ready", flush=True)
 
 
 _V2_PREFIX = "language_model."
+
 
 # The vendor records carry dtype as a string ("float16"); mlx>=0.32 requires a
 # Dtype object in astype(), so the bundled v1 loader's pass-through breaks on
@@ -109,8 +120,8 @@ def _v2_dtype(name: str):
     table = {"float16": mx.float16, "float32": mx.float32, "bfloat16": mx.bfloat16}
     try:
         return table[str(name).lower()]
-    except KeyError:
-        raise ValueError(f"unsupported pack dtype {name!r}")
+    except KeyError as exc:
+        raise ValueError(f"unsupported pack dtype {name!r}") from exc
 
 
 def _load_v2(pack: Path, cfg: dict):
@@ -134,16 +145,21 @@ def _load_v2(pack: Path, cfg: dict):
     text_cfg = cfg.get("text_config") or {}
     fields = set(inspect.signature(TextModelArgs).parameters)
     dropped = sorted(k for k in text_cfg if k not in fields)
-    model = TextModel(TextModelArgs.from_dict(
-        {k: v for k, v in text_cfg.items() if k in fields}))
-    print(f"[prism] TextModel built ({text_cfg.get('num_hidden_layers')} layers; "
-          f"ignored text_config keys: {dropped or 'none'})", flush=True)
+    model = TextModel(TextModelArgs.from_dict({k: v for k, v in text_cfg.items() if k in fields}))
+    print(
+        f"[prism] TextModel built ({text_cfg.get('num_hidden_layers')} layers; "
+        f"ignored text_config keys: {dropped or 'none'})",
+        flush=True,
+    )
 
     t0 = time.monotonic()
     weights = mx.load(str(pack / "model.safetensors"))
     skipped = sorted({n.split(".")[0] for n in weights if not n.startswith(_V2_PREFIX)})
-    print(f"[prism] weight map: {len(weights)} tensors "
-          f"({time.monotonic() - t0:.1f}s); skipped namespaces: {skipped}", flush=True)
+    print(
+        f"[prism] weight map: {len(weights)} tensors "
+        f"({time.monotonic() - t0:.1f}s); skipped namespaces: {skipped}",
+        flush=True,
+    )
 
     records = cfg.get("modules") or []
     for record in records:
@@ -151,8 +167,8 @@ def _load_v2(pack: Path, cfg: dict):
         stem = _V2_PREFIX + path
         try:
             arrays = [weights[stem + "." + s] for s in ("weight", "scales", "biases")]
-        except KeyError:
-            raise ValueError(f"pack record {path!r} has no tensors at {stem}.*")
+        except KeyError as exc:
+            raise ValueError(f"pack record {path!r} has no tensors at {stem}.*") from exc
         block = record.get("block") or 0
         signs = weights.get(stem + ".signs")
         if block and signs is None:
@@ -163,13 +179,20 @@ def _load_v2(pack: Path, cfg: dict):
             parent = parent[int(part)] if part.isdigit() else getattr(parent, part)
         original = getattr(parent, parts[-1])
         validate_record(original, record, arrays, signs)
-        setattr(parent, parts[-1],
-                Packed(arrays, block, signs, record.get("embedding", False),
-                       _v2_dtype(record.get("dtype", "float16"))))
+        setattr(
+            parent,
+            parts[-1],
+            Packed(
+                arrays,
+                block,
+                signs,
+                record.get("embedding", False),
+                _v2_dtype(record.get("dtype", "float16")),
+            ),
+        )
     print(f"[prism] {len(records)} packed modules installed", flush=True)
 
-    items = [(n[len(_V2_PREFIX):], w) for n, w in weights.items()
-             if n.startswith(_V2_PREFIX)]
+    items = [(n[len(_V2_PREFIX) :], w) for n, w in weights.items() if n.startswith(_V2_PREFIX)]
     model.load_weights(items, strict=True)
     model.eval()
     mx.eval(model.parameters())
@@ -199,8 +222,11 @@ def _chat(messages: list, max_tokens: int, temperature: float, top_p: float) -> 
     finish = "length"
     with _STATE["lock"]:
         for resp in stream_generate(
-            _STATE["model"], _STATE["tokenizer"], prompt,
-            max_tokens=max(1, max_tokens), sampler=sampler,
+            _STATE["model"],
+            _STATE["tokenizer"],
+            prompt,
+            max_tokens=max(1, max_tokens),
+            sampler=sampler,
         ):
             chunks.append(resp.text or "")
             if resp.finish_reason:
@@ -211,22 +237,27 @@ def _chat(messages: list, max_tokens: int, temperature: float, top_p: float) -> 
         "object": "chat.completion",
         "created": int(time.time()),
         "model": _STATE["model_id"],
-        "choices": [{
-            "index": 0,
-            "message": {"role": "assistant", "content": text},
-            "finish_reason": "stop" if finish == "stop" else "length",
-        }],
-        "usage": {"prompt_tokens": 0, "completion_tokens": 0,
-                  "total_tokens": 0,
-                  "wall_s": round(time.monotonic() - started, 2)},
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": text},
+                "finish_reason": "stop" if finish == "stop" else "length",
+            }
+        ],
+        "usage": {
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "wall_s": round(time.monotonic() - started, 2),
+        },
     }
 
 
 class _Handler(BaseHTTPRequestHandler):
     server_version = "prism-shim/1"
 
-    def log_message(self, fmt, *args):  # route access log to stderr (spark log file)
-        sys.stderr.write(f"[prism] {self.address_string()} {fmt % args}\n")
+    def log_message(self, format, *args):  # noqa: A002 - stdlib signature; log to stderr
+        sys.stderr.write(f"[prism] {self.address_string()} {format % args}\n")
 
     def _send(self, code: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
@@ -238,11 +269,15 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802
         if self.path in ("/health", "/v1/models"):
-            self._send(200, {
-                "object": "list" if self.path == "/v1/models" else "ok",
-                "data": [{"id": _STATE["model_id"], "object": "model"}]
-                if self.path == "/v1/models" else {"status": "ok"},
-            })
+            self._send(
+                200,
+                {
+                    "object": "list" if self.path == "/v1/models" else "ok",
+                    "data": [{"id": _STATE["model_id"], "object": "model"}]
+                    if self.path == "/v1/models"
+                    else {"status": "ok"},
+                },
+            )
         else:
             self._send(404, {"error": f"unknown path {self.path}"})
 
@@ -285,24 +320,26 @@ class _Handler(BaseHTTPRequestHandler):
 def main(argv=None) -> int:
     args = _parse_args(argv)
     pack = Path(args.pack).expanduser()
-    for needed in ("config.json", "model.safetensors", "tokenizer.json",
-                   "chat_template.jinja"):
+    for needed in ("config.json", "model.safetensors", "tokenizer.json", "chat_template.jinja"):
         if not (pack / needed).is_file():
             print(f"[prism] FATAL: {pack} is missing {needed}", file=sys.stderr)
             return 2
     if not (pack / "runtime" / "artifact.py").is_file():
-        print(f"[prism] FATAL: {pack}/runtime/artifact.py missing "
-              f"(not a Hadamard pack?)", file=sys.stderr)
+        print(
+            f"[prism] FATAL: {pack}/runtime/artifact.py missing (not a Hadamard pack?)",
+            file=sys.stderr,
+        )
         return 2
     try:
         _load(pack, args.model_id)
     except Exception as exc:  # noqa: BLE001 — startup failure must be loud (log tail)
-        print(f"[prism] FATAL: load failed: {type(exc).__name__}: {exc}",
-              file=sys.stderr)
+        print(f"[prism] FATAL: load failed: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
     server = ThreadingHTTPServer((args.host, args.port), _Handler)
-    print(f"[prism] listening on http://{args.host}:{args.port} "
-          f"(model {_STATE['model_id']})", flush=True)
+    print(
+        f"[prism] listening on http://{args.host}:{args.port} (model {_STATE['model_id']})",
+        flush=True,
+    )
     try:
         server.serve_forever()
     except KeyboardInterrupt:

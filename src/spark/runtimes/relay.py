@@ -26,9 +26,7 @@ class RelayBackend(Backend):
     - Routes OpenAI-compatible requests to the external service
     """
 
-    def build_launch_cmd(
-        self, entry: ModelEntry, host: str, port: int
-    ) -> list[str]:
+    def build_launch_cmd(self, entry: ModelEntry, host: str, port: int) -> list[str]:
         """Relay backend does not spawn a process.
 
         Returns an empty list; the external service is assumed to be already

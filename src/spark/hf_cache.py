@@ -33,9 +33,7 @@ from pathlib import Path
 # ``\Z`` (not ``$``): Python's ``$`` also matches *before* a trailing newline,
 # which would let a repo id carrying a newline reach an HF API URL.
 # ASCII-only: ``\w`` admits unicode, which has no place in a cache path segment.
-REPO_ID_RE = re.compile(
-    r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}(/[A-Za-z0-9][A-Za-z0-9_.-]{0,95})?\Z"
-)
+REPO_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}(/[A-Za-z0-9][A-Za-z0-9_.-]{0,95})?\Z")
 #: ``refs/main`` is a commit id, never an arbitrary path component (D14).
 _COMMIT_RE = re.compile(r"[0-9a-fA-F]{40,64}\Z")
 

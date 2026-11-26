@@ -20,7 +20,11 @@ def perform_research(ctx, entry) -> bool:
     if not entry.hf_repo:
         console.print("[yellow]no hf_repo on this model — cannot research[/yellow]")
         return False
-    profile = load_or_probe(ctx.config, ctx.paths.host_profile_file)
+    profile = load_or_probe(
+        ctx.config,
+        ctx.paths.host_profile_file,
+        max_age_s=ctx.config.probe.max_age_s,
+    )
     available = profile.available_runtimes
     console.print(
         f"[bold]spark[/bold] researching [cyan]{entry.id}[/cyan] "
@@ -28,12 +32,18 @@ def perform_research(ctx, entry) -> bool:
     )
     result = run_research(entry.hf_repo, profile, ctx.config, available)
     path = stage(
-        ctx.paths, entry.id, result.output,
-        provider=result.provider, hf_repo=entry.hf_repo,
+        ctx.paths,
+        entry.id,
+        result.output,
+        provider=result.provider,
+        hf_repo=entry.hf_repo,
         host_summary=host_summary(profile, ctx.config),
     )
     ctx.telemetry.info(
-        "research", "staged", model=entry.id, provider=result.provider,
+        "research",
+        "staged",
+        model=entry.id,
+        provider=result.provider,
         recommended=result.output.recommended_backend,
     )
     console.print(

@@ -33,11 +33,22 @@ MISSING_MARK = "MISSING WEIGHTS"
 #: Contexts whose argument must be a model this host can actually launch.
 LAUNCH_CONTEXTS = frozenset({"", "run"})
 
-#: Short-lived, in-process preview cache for unregistered-but-present weights.
-#: Keyed by (id, mtimes of registry/store/cache roots): a fzf-tab preview runs
-#: once per keystroke, and neither the scan nor the size walk must repeat.
-_DESCRIBE_CACHE: dict[tuple[str, tuple[float, ...]], str] = {}
+#: Short-lived, *in-process* preview cache for unregistered-but-present weights.
+#: fzf-tab launches a new process per keystroke, so this cache cannot span
+#: keystrokes — it only helps callers that ask for several previews in one
+#: process. The effective key is (id, root mtimes, resolved location, that
+#: location's st_mtime_ns): a snapshot swapped in place invalidates it even when
+#: the roots' own mtimes did not change. Value: (text, location, location mtime).
+_DESCRIBE_CACHE: dict[tuple[str, tuple[float, ...]], tuple[str, str, int]] = {}
 _DESCRIBE_CACHE_MAX = 64
+
+
+def _location_mtime_ns(location: str) -> int:
+    """Freshness stamp for one resolved snapshot/store directory."""
+    try:
+        return Path(location).stat().st_mtime_ns
+    except OSError:
+        return 0
 
 
 def _discover_signature(paths: SparkPaths) -> tuple[float, ...]:
@@ -59,10 +70,9 @@ def _registry_entries(inv: Inventory) -> list[tuple[ModelEntry, Availability]]:
     ``build_inventory`` has just read every TOML and resolved availability;
     re-listing and re-resolving here would double that work on every Tab.
     """
-    entries = (
-        *inv.runnable_registered, *inv.external, *inv.unverifiable, *inv.missing
-    )
+    entries = (*inv.runnable_registered, *inv.external, *inv.unverifiable, *inv.missing)
     return sorted(entries, key=lambda pair: pair[0].id.lower())
+
 
 # Native zsh completion. fzf-tab, if present, upgrades this to a fuzzy menu.
 _ZSH_COMPLETION = r"""#compdef spark
@@ -153,15 +163,20 @@ def completion_models(
     is_launch = context.strip().lower() in LAUNCH_CONTEXTS
     candidates: list[tuple[str, str]] = []
     try:
-        inv = inventory if inventory is not None else build_inventory(
-            paths, config=None, with_bytes=False
+        inv = (
+            inventory
+            if inventory is not None
+            else build_inventory(paths, config=None, with_bytes=False)
         )
     except Exception:
         inv = None
     if inv is not None:
         if is_launch:
             for entry, _a in (*inv.runnable_registered, *inv.external, *inv.unverifiable):
-                desc = " · ".join(x for x in (entry.backend, entry.quant, entry.model_format) if x) or "model"
+                desc = (
+                    " · ".join(x for x in (entry.backend, entry.quant, entry.model_format) if x)
+                    or "model"
+                )
                 candidates.append((entry.id, desc))
             for m in inv.runnable_discovered:
                 candidates.append((m.display_id, f"{m.source} · on disk · not registered"))
@@ -201,8 +216,9 @@ def _describe_discovered(arg: str, paths: SparkPaths) -> str:
 
     The inventory is built with ``with_bytes=False`` (registry + dirs only); the
     size is measured for this one location instead of every cached snapshot.
-    A cached preview is checked first, using the id and input mtimes, so a
-    repeated keystroke skips both the inventory build and the size walk.
+    A cached preview is checked first, using the id, input mtimes and the
+    resolved location's ``st_mtime_ns``, so a repeat skips both the inventory
+    build and the size walk — but an in-place snapshot swap is never stale.
     """
     from ..hf_cache import bytes_in
     from ..inventory import build_inventory
@@ -210,7 +226,11 @@ def _describe_discovered(arg: str, paths: SparkPaths) -> str:
     key = (arg.strip().lower(), _discover_signature(paths))
     cached = _DESCRIBE_CACHE.get(key)
     if cached is not None:
-        return cached
+        text, location, cached_mtime = cached
+        # The location is known only after a scan; validating its mtime here is
+        # what puts it in the effective cache key (a miss has no location).
+        if not location or _location_mtime_ns(location) == cached_mtime:
+            return text
     inv = build_inventory(paths, config=None, with_bytes=False)
     hit = next(
         (d for d in inv.runnable_discovered if d.display_id.lower() == arg.lower()),
@@ -221,7 +241,7 @@ def _describe_discovered(arg: str, paths: SparkPaths) -> str:
         # disk must not rescan the cache on every remaining keystroke.
         if len(_DESCRIBE_CACHE) >= _DESCRIBE_CACHE_MAX:
             _DESCRIBE_CACHE.clear()
-        _DESCRIBE_CACHE[key] = ""
+        _DESCRIBE_CACHE[key] = ("", "", 0)
         return ""
     present = hit.bytes_present or bytes_in(Path(hit.location))
     size = f"{present / 2**30:.1f} GiB" if present else "—"
@@ -234,7 +254,7 @@ def _describe_discovered(arg: str, paths: SparkPaths) -> str:
     )
     if len(_DESCRIBE_CACHE) >= _DESCRIBE_CACHE_MAX:
         _DESCRIBE_CACHE.clear()
-    _DESCRIBE_CACHE[key] = text
+    _DESCRIBE_CACHE[key] = (text, hit.location, _location_mtime_ns(hit.location))
     return text
 
 
@@ -280,4 +300,3 @@ def complete_command(what: str, arg: str | None) -> None:
     except Exception:
         # Completion must never surface errors into the shell.
         return
-

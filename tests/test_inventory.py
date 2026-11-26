@@ -46,14 +46,21 @@ def hub(tmp_path, monkeypatch):
 
     seed(
         "mlx-community/Small-LLM-8bit",
-        {"model.safetensors": b"w" * 64, "tokenizer.json": b"{}",
-         "chat_template.jinja": b"{% for m in messages %}{% endfor %}"},
+        {
+            "model.safetensors": b"w" * 64,
+            "tokenizer.json": b"{}",
+            "chat_template.jinja": b"{% for m in messages %}{% endfor %}",
+        },
         {"model_type": "qwen3", "architectures": ["Qwen3ForCausalLM"]},
     )
     seed(
         "BAAI/bge-small",
-        {"model.safetensors": b"w" * 64, "tokenizer.json": b"{}",
-         "modules.json": b"{}", "sentence_bert_config.json": b"{}"},
+        {
+            "model.safetensors": b"w" * 64,
+            "tokenizer.json": b"{}",
+            "modules.json": b"{}",
+            "sentence_bert_config.json": b"{}",
+        },
         {"model_type": "bert", "architectures": ["BertModel"]},
     )
     seed(
@@ -83,9 +90,7 @@ def test_gguf_snapshot_is_llm(tmp_path):
 
 
 def test_embedding_snapshot_is_not_servable(hub):
-    kind, reason = classify_snapshot(
-        hub / "models--BAAI--bge-small" / "snapshots" / ("a" * 40)
-    )
+    kind, reason = classify_snapshot(hub / "models--BAAI--bge-small" / "snapshots" / ("a" * 40))
     assert kind == "embedding" and reason
 
 
@@ -100,9 +105,7 @@ def test_prism_pack_is_servable_with_prism_format(tmp_path):
     """Hadamard packs route to prism_ml, not stock mlx_lm (which rejects them)."""
     snap = tmp_path / "snap"
     snap.mkdir()
-    (snap / "config.json").write_text(
-        json.dumps({"model_type": "prism_hadamard_qwen35"})
-    )
+    (snap / "config.json").write_text(json.dumps({"model_type": "prism_hadamard_qwen35"}))
     (snap / "model.safetensors").write_bytes(b"w" * 16)
     (snap / "tokenizer.json").write_bytes(b"{}")
     kind, reason = classify_snapshot(snap)
@@ -161,18 +164,16 @@ def test_store_scan_lists_complete_dirs_as_servable(paths):
 def test_inventory_offers_unregistered_disk_models(paths, hub):
     inv = build_inventory(paths, config=None)
     assert "mlx-community/Small-LLM-8bit" in inv.runnable_ids
-    assert {m.display_id for m in inv.runnable_discovered} == {
-        "mlx-community/Small-LLM-8bit"
-    }
+    assert {m.display_id for m in inv.runnable_discovered} == {"mlx-community/Small-LLM-8bit"}
     assert {m.display_id for m in inv.non_servable} == {
-        "BAAI/bge-small", "mlx-community/Some-TTS-8bit",
+        "BAAI/bge-small",
+        "mlx-community/Some-TTS-8bit",
     }
 
 
 def test_registered_entry_matching_hub_repo_is_not_double_listed(paths, hub):
     save_model(
-        ModelEntry(id="small", hf_repo="mlx-community/Small-LLM-8bit",
-                   model_format="mlx"),
+        ModelEntry(id="small", hf_repo="mlx-community/Small-LLM-8bit", model_format="mlx"),
         paths,
     )
     inv = build_inventory(paths, config=None)
@@ -181,9 +182,7 @@ def test_registered_entry_matching_hub_repo_is_not_double_listed(paths, hub):
 
 
 def test_missing_entries_are_defects_not_runnable(paths, hub):
-    save_model(
-        ModelEntry(id="gone", hf_repo="org/Nope", model_format="mlx"), paths
-    )
+    save_model(ModelEntry(id="gone", hf_repo="org/Nope", model_format="mlx"), paths)
     inv = build_inventory(paths, config=None)
     assert "gone" not in inv.runnable_ids
     assert [e.id for e, _ in inv.missing] == ["gone"]
@@ -221,9 +220,7 @@ def test_run_miss_returns_none_for_suggestions(paths, hub):
 
 
 def test_synthesized_entry_prefers_repo_ref(paths, hub):
-    disc = next(
-        m for m in scan_hub_cache() if m.display_id == "mlx-community/Small-LLM-8bit"
-    )
+    disc = next(m for m in scan_hub_cache() if m.display_id == "mlx-community/Small-LLM-8bit")
     entry = synthesize_entry(disc)
     assert entry.hf_repo == "mlx-community/Small-LLM-8bit"
     assert entry.path == ""  # runtime reads the hub cache via the repo id

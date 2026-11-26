@@ -13,8 +13,12 @@ from spark.probe.host import HostProfile
 
 def _profile(mem_gib=16):
     return HostProfile(
-        os="Darwin", arch="arm64", chip="Apple M2",
-        total_memory_bytes=mem_gib * GIB, cpu_count=8, probed_at=0.0,
+        os="Darwin",
+        arch="arm64",
+        chip="Apple M2",
+        total_memory_bytes=mem_gib * GIB,
+        cpu_count=8,
+        probed_at=0.0,
     )
 
 

@@ -38,8 +38,10 @@ def build_context() -> SparkCtx:
     # configured retention applies from the first prune (which is lazy).
     telemetry.retention_days = config.general.log_retention_days
     telemetry.info(
-        "cli", "session_start",
-        version=spark_version(), argv_count=len(sys.argv),
+        "cli",
+        "session_start",
+        version=spark_version(),
+        argv_count=len(sys.argv),
     )
     secrets = get_secret_store(paths)
     return SparkCtx(
@@ -61,8 +63,11 @@ def refresh_catalog(ctx: "SparkCtx", *, model_id: str = "") -> None:
     from ..catalog import safe_write_catalog
 
     safe_write_catalog(
-        ctx.paths, ctx.config,
-        component="catalog", event="write_failed", model_id=model_id,
+        ctx.paths,
+        ctx.config,
+        component="catalog",
+        event="write_failed",
+        model_id=model_id,
     )
 
 

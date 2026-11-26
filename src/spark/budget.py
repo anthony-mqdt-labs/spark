@@ -10,8 +10,10 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
-from .config.schema import DiskPolicy, MemoryPolicy, ModelEntry
+from .config.schema import DiskPolicy, MemoryPolicy, ModelEntry, SparkConfig
+from .inventory import infer_quant_and_params
 from .probe.host import HostProfile
+from .registry.availability import Availability
 
 GIB = 2**30
 
@@ -28,6 +30,32 @@ def usable_memory_bytes(profile: HostProfile, policy: MemoryPolicy) -> int:
     return int(profile.total_memory_bytes * policy.usable_fraction)
 
 
+def hydrate_budget_metadata(
+    entry: ModelEntry, availability: Availability, config: SparkConfig
+) -> ModelEntry:
+    """Fill the fields the memory gate needs from a disk-first launch's inputs.
+
+    Such launches synthesize their entry from a filename (quant/params) and the
+    availability check (size). Without hydration ``check_memory`` sees "unknown"
+    and silently returns ok=True for a 70B model. ``config`` is accepted as the
+    policy source of truth for callers; the estimate itself currently depends on
+    the entry and the observed weights only. The registry entry is never mutated.
+    """
+    inferred_quant, inferred_params = infer_quant_and_params(
+        entry.hf_repo or entry.path or entry.id
+    )
+    updates: dict[str, object] = {}
+    if not entry.quant and inferred_quant:
+        updates["quant"] = inferred_quant
+    if entry.params_billions is None and inferred_params is not None:
+        updates["params_billions"] = inferred_params
+    if not entry.size_bytes and availability.bytes_present > 1:
+        updates["size_bytes"] = availability.bytes_present
+    if not updates:
+        return entry
+    return entry.model_copy(update=updates)
+
+
 def estimate_footprint_bytes(entry: ModelEntry, policy: MemoryPolicy) -> int | None:
     """Rough resident footprint = weights * overhead.
 
@@ -42,14 +70,14 @@ def estimate_footprint_bytes(entry: ModelEntry, policy: MemoryPolicy) -> int | N
     return None  # unknown — caller decides whether to warn or proceed
 
 
-def check_memory(
-    entry: ModelEntry, profile: HostProfile, policy: MemoryPolicy
-) -> BudgetCheck:
+def check_memory(entry: ModelEntry, profile: HostProfile, policy: MemoryPolicy) -> BudgetCheck:
     budget = usable_memory_bytes(profile, policy)
     est = estimate_footprint_bytes(entry, policy)
     if est is None:
         return BudgetCheck(
-            ok=True, estimate_bytes=None, budget_bytes=budget,
+            ok=True,
+            estimate_bytes=None,
+            budget_bytes=budget,
             detail="footprint unknown (no params/quant/size) — proceeding without a memory gate",
         )
     ok = est <= budget

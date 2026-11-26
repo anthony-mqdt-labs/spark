@@ -55,7 +55,8 @@ def test_keychain_roundtrip(tmp_path):
 
             subprocess.run(
                 ["security", "delete-generic-password", "-s", "spark", "-a", name],
-                capture_output=True, check=False,
+                capture_output=True,
+                check=False,
             )
     assert not store.exists(name)
 

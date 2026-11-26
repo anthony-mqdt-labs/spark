@@ -31,8 +31,7 @@ def _fill(token: str, ctx: dict[str, object]) -> str:
             f"Unknown placeholder {exc} in launch template token {token!r}.",
             code="CFG_INVALID",
             remediation=[
-                "Valid placeholders: {model_path}, {model_dir}, {model_id}, "
-                "{host}, {port}.",
+                "Valid placeholders: {model_path}, {model_dir}, {model_id}, {host}, {port}.",
             ],
         ) from exc
 
@@ -61,6 +60,7 @@ class Backend:
     @property
     def name(self) -> str:
         return self.rt.name
+
     @property
     def default_port(self) -> int:
         return self.rt.server.default_port
@@ -73,6 +73,16 @@ class Backend:
     def requires_local_weights(self) -> bool:
         """Whether spark must find this model's weights on disk before launching."""
         return self.rt.requires_local_weights
+
+    @property
+    def accepts_reserved_fd(self) -> bool:
+        """Whether the launched child can adopt a port spark reserved for it.
+
+        Only spark's own filter-proxy shim can. Other runtimes bind their own
+        port after a bind-then-release probe, leaving a small residual TOCTOU
+        window spark cannot close without runtime cooperation.
+        """
+        return False
 
     # Whether the runtime's HTTP surface comes up *before* its model is resident
     # (mlx_lm/mlx_vlm do: they load lazily on the first request, and answer
@@ -104,9 +114,7 @@ class Backend:
         return self.resolve_model_ref(entry)
 
     # -- launch ----------------------------------------------------------------
-    def build_launch_cmd(
-        self, entry: ModelEntry, host: str, port: int
-    ) -> list[str]:
+    def build_launch_cmd(self, entry: ModelEntry, host: str, port: int) -> list[str]:
         ctx: dict[str, object] = {
             "model_path": self.resolve_model_ref(entry),
             "model_dir": self.resolve_model_dir(entry),
@@ -150,9 +158,7 @@ class Backend:
         return self.rt.server.ready_timeout_s
 
     # -- readiness --------------------------------------------------------------
-    def warmup(
-        self, entry: ModelEntry, host: str, port: int, timeout_s: float
-    ) -> tuple[bool, str]:
+    def warmup(self, entry: ModelEntry, host: str, port: int, timeout_s: float) -> tuple[bool, str]:
         """Force one minimal generation so a lazy runtime actually loads the model.
 
         Returns ``(ok, detail)`` and never raises: the supervisor turns a False
@@ -194,7 +200,6 @@ class Backend:
             return False, f"HTTP {exc.code}{': ' + detail if detail else ''}"
         except Exception as exc:  # noqa: BLE001 - any failure means "not ready"
             return False, f"{type(exc).__name__}: {exc}"
-
 
 
 # --- registry ------------------------------------------------------------------

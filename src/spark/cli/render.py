@@ -124,9 +124,13 @@ def runnable_table(inv: Inventory) -> Table:
             entry.research_status,
         )
     for entry, _avail in inv.external:
-        t.add_row(entry.id, "[magenta]daemon[/magenta]", entry.backend or "—", "—", entry.research_status)
+        t.add_row(
+            entry.id, "[magenta]daemon[/magenta]", entry.backend or "—", "—", entry.research_status
+        )
     for entry, _avail in inv.unverifiable:
-        t.add_row(entry.id, "[dim]unverified[/dim]", entry.backend or "auto", "—", entry.research_status)
+        t.add_row(
+            entry.id, "[dim]unverified[/dim]", entry.backend or "auto", "—", entry.research_status
+        )
     for m in inv.runnable_discovered:
         t.add_row(
             m.display_id,
@@ -175,4 +179,3 @@ def render_inventory_notes(inv: Inventory, *, verbose: bool = False) -> None:
             f"[dim]{len(inv.non_servable)} cached repo(s) are not chat models "
             f"(embeddings/speech) — hidden, see --all[/dim]"
         )
-

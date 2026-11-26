@@ -113,7 +113,9 @@ def test_package_import_registers_prism_adapter():
     )
     proc = subprocess.run(
         [sys.executable, "-c", code],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True,
+        text=True,
+        timeout=60,
     )
     assert proc.returncode == 0, proc.stderr[-2000:]
     assert "prism_ml" in proc.stdout

@@ -24,7 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Deque
 
-from ..redaction import redact, register_secret_value  # re-exported for callers
+from ..redaction import redact
 
 REQUIRED_LEVELS = ("debug", "info", "warn", "error", "critical")
 

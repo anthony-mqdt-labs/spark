@@ -16,8 +16,13 @@ def _staging_path(paths: SparkPaths, model_id: str) -> Path:
 
 
 def stage(
-    paths: SparkPaths, model_id: str, output: ResearchOutput, *,
-    provider: str, hf_repo: str, host_summary: dict,
+    paths: SparkPaths,
+    model_id: str,
+    output: ResearchOutput,
+    *,
+    provider: str,
+    hf_repo: str,
+    host_summary: dict,
 ) -> Path:
     paths.staging_dir.mkdir(parents=True, exist_ok=True)
     doc = {

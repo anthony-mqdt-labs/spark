@@ -11,8 +11,8 @@ depth:
 
 from __future__ import annotations
 
-from ..errors import SparkError
-from ..redaction import CREDENTIAL_PATTERNS, secret_values
+from ..errors import SecretLeakError as SecretLeakError  # re-export: now in errors.py
+from ..redaction import CREDENTIAL_PATTERNS, contains_registered_secret
 
 # Known credential shapes are owned by the shared redaction registry, not by the
 # logger: the guard and the log scrubber must agree on what a credential looks
@@ -20,23 +20,17 @@ from ..redaction import CREDENTIAL_PATTERNS, secret_values
 _TOKEN_PATTERNS = CREDENTIAL_PATTERNS
 
 
-class SecretLeakError(SparkError):
-    code = "SEC_PROMPT_LEAK"
-    exit_code = 77
-
-
 def assert_no_secrets(prompt: str) -> None:
     """Raise SecretLeakError if the prompt appears to contain secret material."""
-    # (a) Exact registered secret values.
-    for v in secret_values():
-        if v and v in prompt:
-            raise SecretLeakError(
-                "Refusing to send a research prompt: it contains a known secret value.",
-                remediation=[
-                    "This is a guard bug — research prompts must never include secrets.",
-                    "File the prompt-builder path; do not bypass this check.",
-                ],
-            )
+    # (a) Exact registered secret values (boundary-aware for short tokens).
+    if contains_registered_secret(prompt):
+        raise SecretLeakError(
+            "Refusing to send a research prompt: it contains a known secret value.",
+            remediation=[
+                "This is a guard bug — research prompts must never include secrets.",
+                "File the prompt-builder path; do not bypass this check.",
+            ],
+        )
     # (b) Token-shaped substrings.
     for pat in _TOKEN_PATTERNS:
         if pat.search(prompt):

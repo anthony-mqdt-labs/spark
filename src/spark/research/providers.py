@@ -110,8 +110,12 @@ class CliAgentProvider(ResearchProvider):
 
         try:
             proc = subprocess.run(
-                cmd, input=stdin_data, capture_output=True, text=True,
-                timeout=self.defn.timeout_s, check=False,
+                cmd,
+                input=stdin_data,
+                capture_output=True,
+                text=True,
+                timeout=self.defn.timeout_s,
+                check=False,
                 env=agent_env(self.scrub_env),
             )
         except (OSError, subprocess.SubprocessError) as exc:
@@ -139,7 +143,8 @@ class CliAgentProvider(ResearchProvider):
             # output is gone). Never contains our secrets: the prompt passed the
             # guard, and telemetry redaction still applies on write.
             get_telemetry().warn(
-                "research", "provider_output_unparseable",
+                "research",
+                "provider_output_unparseable",
                 provider=self.name,
                 error=str(exc)[:300],
                 output_len=len(text),
@@ -150,7 +155,5 @@ class CliAgentProvider(ResearchProvider):
 
 
 def build_providers(config: SparkConfig) -> list[ResearchProvider]:
-    scrub = frozenset(
-        var for rt in config.runtimes.values() for var in rt.server.secret_env
-    )
+    scrub = frozenset(var for rt in config.runtimes.values() for var in rt.server.secret_env)
     return [CliAgentProvider(d, scrub) for d in config.research.providers]

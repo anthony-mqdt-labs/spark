@@ -65,7 +65,9 @@ def known_flags(binary: str, *, timeout_s: float = 15.0) -> set[str] | None:
     try:
         proc = subprocess.run(
             [binary, "--help"],
-            capture_output=True, text=True, timeout=timeout_s,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
             stdin=subprocess.DEVNULL,
         )
     except (OSError, subprocess.SubprocessError):
@@ -116,8 +118,7 @@ def validate_flags(
     for flag in sorted(overrides):
         if flag not in surface:
             errors.append(
-                f"`{flag}` is not a flag of `{rt.server.binary}` "
-                f"(per its installed --help)."
+                f"`{flag}` is not a flag of `{rt.server.binary}` (per its installed --help)."
             )
     return errors, warnings
 
@@ -140,9 +141,7 @@ def validate_accept(
             notes.append(f"quant {rec.quant!r} → {fixed!r}")
         rec = rec.model_copy(update={"quant": fixed})
         output = output.model_copy(
-            update={
-                "per_runtime": {**output.per_runtime, output.recommended_backend: rec}
-            }
+            update={"per_runtime": {**output.per_runtime, output.recommended_backend: rec}}
         )
     apply_output_to_entry(candidate, output)
     backend = candidate.backend

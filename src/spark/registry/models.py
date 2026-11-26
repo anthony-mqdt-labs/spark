@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import tomllib
 from pathlib import Path
+from typing import Callable, TypeVar
 
 from ..config.paths import SparkPaths, resolve_paths
 from ..config.schema import ModelEntry, check_model_id
 from ..errors import AmbiguousModelError, ModelError, ModelNotFoundError
+from ..telemetry import get_telemetry
 
 
 def validate_id(model_id: str) -> str:
@@ -96,7 +98,17 @@ def load_model_file(path: Path) -> ModelEntry:
     return ModelEntry.model_validate(data)
 
 
-def list_models(paths: SparkPaths | None = None) -> list[ModelEntry]:
+def list_models(
+    paths: SparkPaths | None = None,
+    *,
+    on_invalid: Callable[[Path, str], None] | None = None,
+) -> list[ModelEntry]:
+    """Load every registry entry; skip unreadable ones *loudly*.
+
+    The structured warning always carries the file and the full validation
+    message. ``on_invalid`` is for callers that can show that detail to the
+    operator (e.g. ``spark list``); other callers keep the log only.
+    """
     paths = paths or resolve_paths()
     if not paths.models_dir.is_dir():
         return []
@@ -107,20 +119,25 @@ def list_models(paths: SparkPaths | None = None) -> list[ModelEntry]:
         except Exception as exc:  # noqa: BLE001
             # Skip rather than fail the listing — but say so, or a hand-edit
             # typo makes a model silently vanish from every command.
-            from ..telemetry import get_telemetry
-
+            detail = str(exc)
             get_telemetry().warn(
-                "registry", "entry_unreadable", file=f.name,
-                error_type=type(exc).__name__, message=str(exc)[:256],
+                "registry",
+                "entry_unreadable",
+                file=f.name,
+                error_type=type(exc).__name__,
+                message=detail,  # full validation text, not just its type
             )
+            if on_invalid is not None:
+                on_invalid(f, detail)
             continue
         if entry.id != f.stem:
             # Kept (hiding a model is worse), but flagged: forget/save address
             # the file by id, so this entry cannot be dropped by its own name.
-            from ..telemetry import get_telemetry
-
             get_telemetry().warn(
-                "registry", "entry_id_mismatch", file=f.name, model_id=entry.id,
+                "registry",
+                "entry_id_mismatch",
+                file=f.name,
+                model_id=entry.id,
             )
         out.append(entry)
     return out
@@ -136,8 +153,6 @@ def delete_model(model_id: str, paths: SparkPaths | None = None) -> bool:
 
 
 # --- resolution ----------------------------------------------------------------
-from typing import TypeVar
-
 _T = TypeVar("_T")
 
 
@@ -150,8 +165,12 @@ def fuzzy_match(
     """One resolution rule for every CLI path: exact -> prefix -> substring ->
     (optionally) unique repo tail. Returns ``(match, ambiguous_candidates)``.
 
+    ``tails`` is NOT redundant, even though a repo tail is always a substring of
+    the full name: when several names share the substring but only one has it
+    as a repository tail, the tail rule resolves an otherwise ambiguous match.
+
     Callers used to reimplement this with slightly different rules, so a model
-    could resolve in `spark run` but not in `spark adopt` or completion.
+    could resolve in `spark run` but not in `spark adopt`.
     """
     q = (query or "").strip().lower()
     if not q:
@@ -179,10 +198,9 @@ def fuzzy_match(
     if len(substr) == 1:
         return substr[0], []
     if tails:
-        tail = _unique([
-            value for name, value in candidates
-            if name.lower().split("/")[-1].startswith(q)
-        ])
+        tail = _unique(
+            [value for name, value in candidates if name.lower().split("/")[-1].startswith(q)]
+        )
         if len(tail) == 1:
             return tail[0], []
     return None, _unique(prefix or substr)

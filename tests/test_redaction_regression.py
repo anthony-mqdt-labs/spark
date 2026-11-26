@@ -42,7 +42,30 @@ def test_registered_value_is_scrubbed_from_free_text():
 def test_short_secret_is_also_scrubbed():
     # The old logger skipped values shorter than four characters entirely.
     register_secret_value("xy")
-    assert scrub_string("key=xy&other=1") == f"key={REDACTED}&other=1"
+    assert scrub_string("hf_token=xy&other=1") == f"hf_token={REDACTED}&other=1"
+
+
+def test_short_secret_does_not_break_an_ordinary_research_prompt():
+    # A one-character token must not make every prompt containing "max" or
+    # "context" fail the guard.
+    register_secret_value("x")
+    assert_no_secrets("Suggest flags for max tokens and context length")
+
+
+def test_short_secret_is_still_detected_when_standalone():
+    register_secret_value("x")
+    with pytest.raises(SecretLeakError):
+        assert_no_secrets("the token is x here")
+
+
+def test_short_secret_does_not_mangle_ordinary_log_text():
+    register_secret_value("1")
+    assert scrub_string("Llama-3.1-8B q4") == "Llama-3.1-8B q4"
+
+
+def test_short_secret_is_scrubbed_in_a_credential_context():
+    register_secret_value("1")
+    assert scrub_string("hf_token=1 failed") == f"hf_token={REDACTED} failed"
 
 
 def test_credential_pattern_is_scrubbed_without_prior_registration():
@@ -61,9 +84,7 @@ def test_auth_key_is_sensitive_but_author_and_count_keys_are_not():
 
 def test_redact_masks_nested_sensitive_keys_and_scrubs_strings():
     register_secret_value("supersecretvalue")
-    result = redact(
-        {"auth": "opaque", "items": [{"hf_token": "opaque"}, "use supersecretvalue"]}
-    )
+    result = redact({"auth": "opaque", "items": [{"hf_token": "opaque"}, "use supersecretvalue"]})
     assert result == {
         "auth": REDACTED,
         "items": [{"hf_token": REDACTED}, f"use {REDACTED}"],

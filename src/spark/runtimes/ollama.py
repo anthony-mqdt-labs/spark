@@ -28,9 +28,7 @@ class OllamaBackend(Backend):
 
     def _daemon_healthy(self, host: str, port: int) -> bool:
         try:
-            with urllib.request.urlopen(
-                f"http://{host}:{port}/api/tags", timeout=3
-            ) as r:
+            with urllib.request.urlopen(f"http://{host}:{port}/api/tags", timeout=3) as r:
                 return r.status == 200
         except Exception:
             return False
@@ -38,7 +36,10 @@ class OllamaBackend(Backend):
     def _installed_tags(self) -> list[str]:
         try:
             out = subprocess.run(
-                ["ollama", "list"], capture_output=True, text=True, timeout=10,
+                ["ollama", "list"],
+                capture_output=True,
+                text=True,
+                timeout=10,
                 check=False,
             )
             tags = []

@@ -25,7 +25,9 @@ def _output(**overrides) -> ResearchOutput:
         recommended_backend="mlx_lm",
         per_runtime={
             "mlx_lm": RuntimeRec(
-                quant="q8", launch_overrides=overrides, context_length=8192,
+                quant="q8",
+                launch_overrides=overrides,
+                context_length=8192,
             )
         },
     )
@@ -52,8 +54,16 @@ def _config_with_fake_binary(tmp_path) -> tuple:
 # --- quant --------------------------------------------------------------------
 @pytest.mark.parametrize(
     ("raw", "fixed"),
-    [("2bit", "q2"), ("4-BIT", "q4"), ("8 bit", "q8"), ("q4", "q4"),
-     ("Q8_0", "Q8_0"), ("Q4_K_M", "Q4_K_M"), ("f16", "f16"), ("", "")],
+    [
+        ("2bit", "q2"),
+        ("4-BIT", "q4"),
+        ("8 bit", "q8"),
+        ("q4", "q4"),
+        ("Q8_0", "Q8_0"),
+        ("Q4_K_M", "Q4_K_M"),
+        ("f16", "f16"),
+        ("", ""),
+    ],
 )
 def test_normalize_quant_only_rewrites_bare_bit_tags(raw, fixed):
     assert normalize_quant(raw) == fixed
@@ -89,9 +99,7 @@ def test_unprobable_surface_warns_open(tmp_path, monkeypatch):
     from spark.config.loader import load_config
 
     config = load_config()
-    monkeypatch.setattr(
-        "spark.research.validate.known_flags", lambda *a, **k: None
-    )
+    monkeypatch.setattr("spark.research.validate.known_flags", lambda *a, **k: None)
     errors, warnings = validate_flags({"--anything": "1"}, "mlx_lm", config)
     assert errors == []
     assert any("skipped" in w for w in warnings)
@@ -132,8 +140,10 @@ def test_validate_accept_catches_stale_carryover_flags(tmp_path):
     """A backend switch must not smuggle the old server's flags along."""
     config, _ = _config_with_fake_binary(tmp_path)
     entry = ModelEntry(
-        id="m", backend="mlx_vlm",
-        launch_overrides={"--max-kv-size": "16384"}, model_format="mlx",
+        id="m",
+        backend="mlx_vlm",
+        launch_overrides={"--max-kv-size": "16384"},
+        model_format="mlx",
     )
     _, errors, _ = validate_accept(entry, _output(), config)
     assert any("--max-kv-size" in e for e in errors)

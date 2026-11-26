@@ -15,6 +15,11 @@ log_retention_days = 7
 # Backend preference for this class of host (Apple Silicon). Highest first.
 preference = ["mlx_lm", "mlx_vlm", "llama_cpp", "omlx", "ollama"]
 
+# Host probe cache: a fresh detection is this expensive, so reuse it for a day
+# unless --reprobe / doctor --no-cache is asked for.
+[probe]
+max_age_s = 86400.0
+
 [memory]
 # 16 GB unified memory is shared with the OS + GUI. 0.65 leaves real headroom.
 usable_fraction = 0.65
@@ -49,6 +54,14 @@ shutdown_grace_s = 10.0
 # from "merely breathing" — a dead generator thread would otherwise be reported
 # ready forever, with every request hanging.
 verify_generation = true
+# Health probe socket timeout; distinct from the interval between probes.
+health_probe_timeout_s = 3.0
+# Published endpoint records are heartbeat-updated this often.
+instance_heartbeat_s = 30.0
+# Peak RSS is sampled every Nth monitor tick (ps is a fork+exec per sample).
+rss_sample_ticks = 6
+# Roll the per-server stdout/stderr log once it passes this size.
+server_log_roll_mib = 64
 
 # Research providers for `spark download`: an ordered fallback chain. Each is
 # tried until one returns a schema-valid config. A provider is skipped if its
@@ -58,6 +71,8 @@ verify_generation = true
 [research]
 enabled = true
 model_card_chars = 6000
+# --help probe for accept-time flag validation (a cold llama.cpp build can be slow).
+flag_probe_timeout_s = 15.0
 
 [[research.providers]]
 name = "claude"

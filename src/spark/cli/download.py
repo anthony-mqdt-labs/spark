@@ -21,6 +21,8 @@ import subprocess
 import time
 from contextlib import contextmanager
 from pathlib import Path
+from types import FrameType
+from typing import Any
 
 import click
 
@@ -55,7 +57,7 @@ def _infer(repo: str) -> dict:
     quant, params = infer_quant_and_params(name)
     return {
         "model_format": fmt,
-        "quant": quant,           # '4bit' -> 'q4' (shared with discovery/adopt)
+        "quant": quant,  # '4bit' -> 'q4' (shared with discovery/adopt)
         "params_billions": params,
     }
 
@@ -104,9 +106,14 @@ def _disk_preflight(
     need = max(total - have, 0) if total is not None else None
 
     ctx.telemetry.info(
-        "download", "disk_preflight",
-        repo=repo, free_bytes=free, floor_gib=floor,
-        repo_bytes=total, resume_bytes=have, need_bytes=need,
+        "download",
+        "disk_preflight",
+        repo=repo,
+        free_bytes=free,
+        floor_gib=floor,
+        repo_bytes=total,
+        resume_bytes=have,
+        need_bytes=need,
     )
 
     if need is None:
@@ -159,10 +166,10 @@ def _raise_on_terminate():
     terminal telemetry event is written before the process dies. (SIGKILL is
     uncatchable by design; everything else must leave a trace.)"""
 
-    def handler(signum, frame):
+    def handler(signum: int, frame: FrameType | None) -> None:
         raise _FetchInterrupt(signum)
 
-    previous: dict[int, object] = {}
+    previous: dict[int, Any] = {}
     for sig in (signal.SIGTERM, signal.SIGHUP):
         try:
             previous[sig] = signal.signal(sig, handler)
@@ -175,9 +182,7 @@ def _raise_on_terminate():
             signal.signal(sig, prev)
 
 
-def _run_fetch(
-    ctx: SparkCtx, hf: str, repo: str, mid: str, dest: Path, env: dict | None
-) -> None:
+def _run_fetch(ctx: SparkCtx, hf: str, repo: str, mid: str, dest: Path, env: dict | None) -> None:
     """Run `hf download` emitting exactly one terminal telemetry event on every
     exit path: fetch_complete | fetch_failed | fetch_interrupted."""
     bytes_before = _dir_bytes(dest)
@@ -191,8 +196,12 @@ def _run_fetch(
             subprocess.run(cmd, check=True, env=env)
     except subprocess.CalledProcessError as exc:
         ctx.telemetry.error(
-            "download", "fetch_failed", repo=repo, model_id=mid,
-            rc=exc.returncode, wall_s=round(time.monotonic() - started, 1),
+            "download",
+            "fetch_failed",
+            repo=repo,
+            model_id=mid,
+            rc=exc.returncode,
+            wall_s=round(time.monotonic() - started, 1),
         )
         raise SparkError(
             f"Download failed (hf exit {exc.returncode}).",
@@ -205,22 +214,34 @@ def _run_fetch(
         ) from exc
     except KeyboardInterrupt:
         ctx.telemetry.warn(
-            "download", "fetch_interrupted", repo=repo, model_id=mid,
-            signal="SIGINT", wall_s=round(time.monotonic() - started, 1),
+            "download",
+            "fetch_interrupted",
+            repo=repo,
+            model_id=mid,
+            signal="SIGINT",
+            wall_s=round(time.monotonic() - started, 1),
             bytes_fetched=_dir_bytes(dest) - bytes_before,
         )
         raise
     except _FetchInterrupt as sig:
         ctx.telemetry.warn(
-            "download", "fetch_interrupted", repo=repo, model_id=mid,
-            signal=sig.name, wall_s=round(time.monotonic() - started, 1),
+            "download",
+            "fetch_interrupted",
+            repo=repo,
+            model_id=mid,
+            signal=sig.name,
+            wall_s=round(time.monotonic() - started, 1),
             bytes_fetched=_dir_bytes(dest) - bytes_before,
         )
-        raise SystemExit(128 + sig.signum)
+        raise SystemExit(128 + sig.signum) from sig
     except BaseException as exc:
         ctx.telemetry.error(
-            "download", "fetch_failed", repo=repo, model_id=mid,
-            error_type=type(exc).__name__, message=str(exc)[:256],
+            "download",
+            "fetch_failed",
+            repo=repo,
+            model_id=mid,
+            error_type=type(exc).__name__,
+            message=str(exc)[:256],
             wall_s=round(time.monotonic() - started, 1),
         )
         raise
@@ -228,8 +249,12 @@ def _run_fetch(
         wall = time.monotonic() - started
         fetched = _dir_bytes(dest) - bytes_before
         ctx.telemetry.info(
-            "download", "fetch_complete", repo=repo, model_id=mid,
-            bytes_fetched=fetched, wall_s=round(wall, 1),
+            "download",
+            "fetch_complete",
+            repo=repo,
+            model_id=mid,
+            bytes_fetched=fetched,
+            wall_s=round(wall, 1),
             rate_kibps=round(fetched / 1024 / wall, 1) if wall > 0 else None,
         )
 
@@ -237,12 +262,13 @@ def _run_fetch(
 @click.command(name="download")
 @click.argument("repo")
 @click.option("--id", "model_id", default=None, help="Override the model id/slug.")
-@click.option("--no-fetch", is_flag=True,
-              help="Register a pointer without downloading weights now.")
-@click.option("--no-research", is_flag=True,
-              help="Skip the agent research step (no LLM calls).")
-@click.option("--force", is_flag=True,
-              help="Bypass the disk preflight gate (not the memory gates).")
+@click.option(
+    "--no-fetch", is_flag=True, help="Register a pointer without downloading weights now."
+)
+@click.option("--no-research", is_flag=True, help="Skip the agent research step (no LLM calls).")
+@click.option(
+    "--force", is_flag=True, help="Bypass the disk preflight gate (not the memory gates)."
+)
 def download_command(
     repo: str, model_id: str | None, no_fetch: bool, no_research: bool, force: bool
 ):
@@ -285,7 +311,9 @@ def download_command(
             raise SparkError(
                 "Hugging Face CLI not found.",
                 code="NET_NO_HF_CLI",
-                remediation=["Install it: brew install huggingface-cli  (or: uv tool install huggingface_hub)"],
+                remediation=[
+                    "Install it: brew install huggingface-cli  (or: uv tool install huggingface_hub)"
+                ],
             )
         dest = ctx.paths.model_store_dir / mid
         # HF token, if present, is injected into env only — never argv/logged.
@@ -308,11 +336,13 @@ def download_command(
     if existing is not None:
         # Re-download of the same repo (a re-fetch after reclaiming disk): keep
         # the tuned backend/flags/research; refresh only what the fetch changed.
-        entry = existing.model_copy(update={
-            "hf_repo": repo,
-            "path": path or existing.path,
-            "size_bytes": size or existing.size_bytes,
-        })
+        entry = existing.model_copy(
+            update={
+                "hf_repo": repo,
+                "path": path or existing.path,
+                "size_bytes": size or existing.size_bytes,
+            }
+        )
     else:
         entry = ModelEntry(
             id=mid,
@@ -327,8 +357,10 @@ def download_command(
     save_model(entry, ctx.paths)
     ctx.telemetry.info("download", "registered", model_id=mid, fetched=not no_fetch)
     refresh_catalog(ctx, model_id=mid)
-    console.print(f"[green]✓[/green] registered [cyan]{mid}[/cyan] "
-                  f"(format={entry.model_format or 'any'}, quant={entry.quant or '?'})")
+    console.print(
+        f"[green]✓[/green] registered [cyan]{mid}[/cyan] "
+        f"(format={entry.model_format or 'any'}, quant={entry.quant or '?'})"
+    )
 
     # Research: run the agent chain (unless opted out / disabled). Failure here is
     # non-fatal — the model is already registered and runnable.
@@ -344,5 +376,7 @@ def download_command(
         perform_research(ctx, entry)
     except SparkError as exc:
         ctx.telemetry.warn("download", "research_failed", model_id=mid, code=exc.code)
-        console.print(f"[yellow]research unavailable[/yellow] ({exc.code}); model still "
-                      f"runnable. Retry: spark research {mid}")
+        console.print(
+            f"[yellow]research unavailable[/yellow] ({exc.code}); model still "
+            f"runnable. Retry: spark research {mid}"
+        )

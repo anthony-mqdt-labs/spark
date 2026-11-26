@@ -25,16 +25,21 @@ from .render import console, render_store_issues, runtimes_table
 @click.command(name="doctor")
 @click.option("--no-cache", is_flag=True, help="Force a fresh probe.")
 @click.option(
-    "--fix", "apply_fix", is_flag=True,
+    "--fix",
+    "apply_fix",
+    is_flag=True,
     help="Install missing runtime Python deps into each runtime's own tool env "
-         "(only runtimes installed via `uv tool install`; the command is shown "
-         "before it runs).",
+    "(only runtimes installed via `uv tool install`; the command is shown "
+    "before it runs).",
 )
 def doctor_command(no_cache: bool, apply_fix: bool) -> None:
     """Diagnose host capabilities and runtime availability."""
     ctx = build_context()
     profile = load_or_probe(
-        ctx.config, ctx.paths.host_profile_file, force=no_cache
+        ctx.config,
+        ctx.paths.host_profile_file,
+        max_age_s=ctx.config.probe.max_age_s,
+        force=no_cache,
     )
 
     mem_total = profile.total_memory_bytes / GIB
@@ -47,8 +52,7 @@ def doctor_command(no_cache: bool, apply_fix: bool) -> None:
     )
     console.print(
         f"[bold]Budget[/bold]: ~{mem_budget:.1f} GiB usable for weights  ·  "
-        f"{free:.1f} GiB free disk"
-        + ("  [yellow](low disk)[/yellow]" if free < 20 else "")
+        f"{free:.1f} GiB free disk" + ("  [yellow](low disk)[/yellow]" if free < 20 else "")
     )
     console.print(runtimes_table(profile))
     render_store_issues(scan_store(ctx.paths))
@@ -72,9 +76,7 @@ def doctor_command(no_cache: bool, apply_fix: bool) -> None:
         if fix_argv:
             fix = f"{' '.join(fix_argv)}  (or: spark doctor --fix)"
         else:
-            with_flags = " ".join(
-                f"--with {split_python_req(r)[1]}" for r in missing
-            )
+            with_flags = " ".join(f"--with {split_python_req(r)[1]}" for r in missing)
             fix = f"add to {name}'s venv: {with_flags}"
         console.print(
             f"[yellow]![/yellow] {name}: missing Python deps "
@@ -106,9 +108,7 @@ def doctor_command(no_cache: bool, apply_fix: bool) -> None:
         )
 
 
-def _fix_python_deps(
-    rt: RuntimeDef, missing: list[str], argv: list[str]
-) -> bool:
+def _fix_python_deps(rt: RuntimeDef, missing: list[str], argv: list[str]) -> bool:
     """Run the derived installer for `rt`, then re-verify. Returns True when the
     runtime's interpreter can import everything afterwards."""
     log = get_telemetry()
@@ -118,8 +118,11 @@ def _fix_python_deps(
         f"running [bold]{' '.join(argv)}[/bold]"
     )
     log.info(
-        "cli", "python_deps_fix_started",
-        runtime=rt.name, missing=mods, command=argv,
+        "cli",
+        "python_deps_fix_started",
+        runtime=rt.name,
+        missing=mods,
+        command=argv,
     )
     t0 = time.monotonic()
     try:
@@ -127,27 +130,34 @@ def _fix_python_deps(
         rc = subprocess.run(argv, check=False).returncode
     except OSError as exc:
         log.error(
-            "cli", "python_deps_fix_failed",
-            runtime=rt.name, error_type=type(exc).__name__, message=str(exc),
+            "cli",
+            "python_deps_fix_failed",
+            runtime=rt.name,
+            error_type=type(exc).__name__,
+            message=str(exc),
         )
         console.print(f"[red]✗[/red] {rt.name}: could not run installer: {exc}")
         return False
     wall_s = round(time.monotonic() - t0, 1)
     if rc != 0:
         log.error(
-            "cli", "python_deps_fix_failed",
-            runtime=rt.name, rc=rc, wall_s=wall_s,
+            "cli",
+            "python_deps_fix_failed",
+            runtime=rt.name,
+            rc=rc,
+            wall_s=wall_s,
         )
-        console.print(
-            f"[red]✗[/red] {rt.name}: installer exited {rc} — deps unchanged."
-        )
+        console.print(f"[red]✗[/red] {rt.name}: installer exited {rc} — deps unchanged.")
         return False
     still = missing_python_deps(rt.detect.binary, rt.detect.python_requires)
     if still:
         mods_left = [split_python_req(r)[0] for r in still]
         log.warn(
-            "cli", "python_deps_fix_incomplete",
-            runtime=rt.name, still_missing=mods_left, wall_s=wall_s,
+            "cli",
+            "python_deps_fix_incomplete",
+            runtime=rt.name,
+            still_missing=mods_left,
+            wall_s=wall_s,
         )
         console.print(
             f"[red]✗[/red] {rt.name}: installer succeeded but "
@@ -156,11 +166,11 @@ def _fix_python_deps(
         )
         return False
     log.info(
-        "cli", "python_deps_fix_succeeded",
-        runtime=rt.name, installed=mods, wall_s=wall_s,
+        "cli",
+        "python_deps_fix_succeeded",
+        runtime=rt.name,
+        installed=mods,
+        wall_s=wall_s,
     )
-    console.print(
-        f"[green]✓[/green] {rt.name}: {', '.join(mods)} now importable "
-        f"({wall_s}s)."
-    )
+    console.print(f"[green]✓[/green] {rt.name}: {', '.join(mods)} now importable ({wall_s}s).")
     return True

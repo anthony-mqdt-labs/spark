@@ -36,21 +36,31 @@ def _load_security() -> ctypes.CDLL | None:
     if platform.system() != "Darwin":
         return None
     try:
-        lib = ctypes.CDLL(
-            "/System/Library/Frameworks/Security.framework/Security"
-        )
+        lib = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
     except OSError:
         return None
 
     lib.SecKeychainAddGenericPassword.argtypes = [
-        c_void_p, c_uint32, c_char_p, c_uint32, c_char_p,
-        c_uint32, c_char_p, POINTER(c_void_p),
+        c_void_p,
+        c_uint32,
+        c_char_p,
+        c_uint32,
+        c_char_p,
+        c_uint32,
+        c_char_p,
+        POINTER(c_void_p),
     ]
     lib.SecKeychainAddGenericPassword.restype = ctypes.c_int32
 
     lib.SecKeychainFindGenericPassword.argtypes = [
-        c_void_p, c_uint32, c_char_p, c_uint32, c_char_p,
-        POINTER(c_uint32), POINTER(c_void_p), POINTER(c_void_p),
+        c_void_p,
+        c_uint32,
+        c_char_p,
+        c_uint32,
+        c_char_p,
+        POINTER(c_uint32),
+        POINTER(c_void_p),
+        POINTER(c_void_p),
     ]
     lib.SecKeychainFindGenericPassword.restype = ctypes.c_int32
 
@@ -106,6 +116,10 @@ class KeychainStore(SecretStore):
             )
         raise SecretBackendError(
             f"Keychain {op} failed for '{name}' (OSStatus {status}).",
+            remediation=[
+                "Check Keychain Access for a denied or damaged item.",
+                "Retry, then re-store the secret with: spark secret set <name>",
+            ],
             context={"op": op, "status": status},
         )
 
@@ -113,13 +127,18 @@ class KeychainStore(SecretStore):
     def _add_raw(self, acct: bytes, data: bytes) -> int:
         """Single raw `SecKeychainAddGenericPassword` call; value stays in memory."""
         lib = self._require()
-        return int(lib.SecKeychainAddGenericPassword(
-            None,
-            len(self._service), self._service,
-            len(acct), acct,
-            len(data), data,
-            byref(c_void_p()),
-        ))
+        return int(
+            lib.SecKeychainAddGenericPassword(
+                None,
+                len(self._service),
+                self._service,
+                len(acct),
+                acct,
+                len(data),
+                data,
+                byref(c_void_p()),
+            )
+        )
 
     def set(self, name: str, value: str) -> None:
         validate_name(name)
@@ -150,9 +169,12 @@ class KeychainStore(SecretStore):
         item_ref = c_void_p()
         status = lib.SecKeychainFindGenericPassword(
             None,
-            len(self._service), self._service,
-            len(acct), acct,
-            byref(length), byref(data_ptr),
+            len(self._service),
+            self._service,
+            len(acct),
+            acct,
+            byref(length),
+            byref(data_ptr),
             byref(item_ref),
         )
         if status == _ERR_SEC_ITEM_NOT_FOUND:
@@ -185,9 +207,13 @@ class KeychainStore(SecretStore):
         item_ref = c_void_p()
         status = lib.SecKeychainFindGenericPassword(
             None,
-            len(self._service), self._service,
-            len(acct), acct,
-            None, None, byref(item_ref),
+            len(self._service),
+            self._service,
+            len(acct),
+            acct,
+            None,
+            None,
+            byref(item_ref),
         )
         return status, item_ref
 

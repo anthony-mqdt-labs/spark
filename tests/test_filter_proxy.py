@@ -13,8 +13,11 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import urllib.parse
 import urllib.request
 from pathlib import Path
+
+import pytest
 
 from spark.config.schema import ModelEntry
 
@@ -27,15 +30,23 @@ def _proxy():
 
 def _entries():
     return [
-        (ModelEntry(id="reg-hub", hf_repo="org/Hub", model_format="mlx",
-                    backend="mlx_lm"), object()),
-        (ModelEntry(id="reg-store", path="/w/store", model_format="mlx",
-                    backend="mlx_lm"), object()),
+        (
+            ModelEntry(id="reg-hub", hf_repo="org/Hub", model_format="mlx", backend="mlx_lm"),
+            object(),
+        ),
+        (
+            ModelEntry(id="reg-store", path="/w/store", model_format="mlx", backend="mlx_lm"),
+            object(),
+        ),
         (ModelEntry(id="pending", model_format="any", backend=""), object()),
-        (ModelEntry(id="gguf", hf_repo="org/G", model_format="gguf",
-                    backend="llama_cpp"), object()),
-        (ModelEntry(id="prism", hf_repo="org/P", model_format="prism",
-                    backend="prism_ml"), object()),
+        (
+            ModelEntry(id="gguf", hf_repo="org/G", model_format="gguf", backend="llama_cpp"),
+            object(),
+        ),
+        (
+            ModelEntry(id="prism", hf_repo="org/P", model_format="prism", backend="prism_ml"),
+            object(),
+        ),
     ]
 
 
@@ -53,9 +64,7 @@ class _Inv:
 def test_allowed_ids_is_served_first_then_runnable_mlx(monkeypatch):
     import spark.inventory
 
-    monkeypatch.setattr(
-        spark.inventory, "build_inventory", lambda *a, **k: _Inv(_entries())
-    )
+    monkeypatch.setattr(spark.inventory, "build_inventory", lambda *a, **k: _Inv(_entries()))
     ids = _proxy().allowed_ids("served-model")
     assert ids[0] == "served-model"
     # Hub repo id and store path both addressable; unknown-format and
@@ -71,9 +80,7 @@ def test_allowed_ids_is_served_first_then_runnable_mlx(monkeypatch):
 def test_allowed_ids_dedupes_served(monkeypatch):
     import spark.inventory
 
-    monkeypatch.setattr(
-        spark.inventory, "build_inventory", lambda *a, **k: _Inv(_entries())
-    )
+    monkeypatch.setattr(spark.inventory, "build_inventory", lambda *a, **k: _Inv(_entries()))
     ids = _proxy().allowed_ids("org/Hub")
     assert ids.count("org/Hub") == 1 and ids[0] == "org/Hub"
 
@@ -86,6 +93,37 @@ def test_allowed_ids_degrades_to_served_only(monkeypatch):
 
     monkeypatch.setattr(spark.inventory, "build_inventory", _boom)
     assert _proxy().allowed_ids("served-model") == ["served-model"]
+
+
+@pytest.mark.parametrize("url", ["http://", "http:///v1/models"])
+def test_upstream_without_host_fails_loudly(url):
+    proxy = _proxy()
+    parts = urllib.parse.urlparse(url)
+    with pytest.raises(ValueError) as exc:
+        proxy._upstream(parts)
+    assert "no host" in str(exc.value)
+    assert "--upstream" in str(exc.value)  # remediation-style message
+    with pytest.raises(ValueError):
+        proxy._probe_health(parts, "/v1/models")
+
+
+def test_non_http_upstream_is_rejected():
+    proxy = _proxy()
+    parts = urllib.parse.urlparse("https://127.0.0.1:9")
+    with pytest.raises(ValueError, match="only http upstreams supported"):
+        proxy._upstream(parts)
+
+
+def test_log_message_matches_stdlib_signature():
+    import inspect
+    from http.server import BaseHTTPRequestHandler
+
+    from spark.shims import prism_shim
+
+    expected = tuple(inspect.signature(BaseHTTPRequestHandler.log_message).parameters)
+    assert expected == ("self", "format", "args")
+    for handler in (_proxy()._Handler, prism_shim._Handler):
+        assert tuple(inspect.signature(handler.log_message).parameters) == expected
 
 
 def test_models_request_matching():
@@ -116,7 +154,7 @@ def test_proxied_launch_shape(config, tmp_path):
     assert ["--host", "127.0.0.1", "--port", "8095"] == cmd[2:6]
     assert "--served-id" in cmd and "org/M" in cmd
     sep = cmd.index("--")
-    inner = cmd[sep + 1:]
+    inner = cmd[sep + 1 :]
     assert inner[0] == "mlx_lm.server"
     assert "--model" in inner and "org/M" in inner
     # Backend binds loopback-ephemeral, never the published port.
@@ -199,23 +237,30 @@ def _run_proxy(tmp_path, served_id, extra_args=None):
     stub_port, pub_port = _free_port(), _free_port()
     stub = tmp_path / "stub_backend.py"
     stub.write_text(_STUB.replace("{port}", str(stub_port)))
-    shim = (
-        Path(__import__("spark.shims.openai_filter_proxy", fromlist=["x"]).__file__)
-    )
+    shim = Path(__import__("spark.shims.openai_filter_proxy", fromlist=["x"]).__file__)
     cmd = [
-        sys.executable, str(shim),
-        "--host", "127.0.0.1", "--port", str(pub_port),
-        "--upstream", f"http://127.0.0.1:{stub_port}",
-        "--served-id", served_id,
-        "--ready-timeout-s", "20",
-        "--unhealthy-exit-after", "1",
-        "--monitor-interval-s", "0.2",
+        sys.executable,
+        str(shim),
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(pub_port),
+        "--upstream",
+        f"http://127.0.0.1:{stub_port}",
+        "--served-id",
+        served_id,
+        "--ready-timeout-s",
+        "20",
+        "--unhealthy-exit-after",
+        "1",
+        "--monitor-interval-s",
+        "0.2",
         *(extra_args or []),
         "--",
-        sys.executable, str(stub),
+        sys.executable,
+        str(stub),
     ]
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     base = f"http://127.0.0.1:{pub_port}"
     for _ in range(200):
         try:
@@ -247,10 +292,12 @@ def test_proxy_filters_listing_but_passes_through(tmp_path, monkeypatch):
     from spark.registry import save_model
 
     home = tmp_path / "sparkhome"
-    paths = SparkPaths(config_dir=home / "config", data_dir=home / "data",
-                       cache_dir=home / "cache").ensure()
-    save_model(ModelEntry(id="reg-hub", hf_repo="org/Hub", model_format="mlx",
-                          backend="mlx_lm"), paths)
+    paths = SparkPaths(
+        config_dir=home / "config", data_dir=home / "data", cache_dir=home / "cache"
+    ).ensure()
+    save_model(
+        ModelEntry(id="reg-hub", hf_repo="org/Hub", model_format="mlx", backend="mlx_lm"), paths
+    )
     hub = tmp_path / "hfcache"
     snap = hub / "models--org--Hub" / "snapshots" / ("b" * 40)
     snap.mkdir(parents=True)
@@ -272,7 +319,8 @@ def test_proxy_filters_listing_but_passes_through(tmp_path, monkeypatch):
         req = urllib.request.Request(
             base + "/v1/chat/completions",
             data=json.dumps({"model": "x", "messages": []}).encode(),
-            headers={"Content-Type": "application/json"}, method="POST",
+            headers={"Content-Type": "application/json"},
+            method="POST",
         )
         with urllib.request.urlopen(req, timeout=10) as r:
             echoed = json.loads(r.read())
@@ -290,7 +338,8 @@ def _listeners(port: int) -> list[str]:
     # lsof has no per-port listen filter together with -t on all macOS versions.
     holders = subprocess.run(
         ["lsof", "-nP", "-sTCP:LISTEN"],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     pids = []
     for line in holders.stdout.splitlines():
@@ -325,8 +374,12 @@ def test_proxy_streams_instead_of_buffering(tmp_path):
 
     proc, base, _ = _run_proxy(tmp_path, "served-model")
     try:
-        req = urllib.request.Request(base + "/v1/stream", data=b"{}", method="POST",
-                                     headers={"Content-Type": "application/json"})
+        req = urllib.request.Request(
+            base + "/v1/stream",
+            data=b"{}",
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
         t0 = time.monotonic()
         with urllib.request.urlopen(req, timeout=10) as r:
             first = r.readline()

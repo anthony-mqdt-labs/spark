@@ -22,9 +22,9 @@ _HF_DL_SUBDIR = Path(".cache") / "huggingface" / "download"
 @dataclass(frozen=True)
 class StoreIssue:
     path: Path
-    model_id: str          # directory name (the id `spark download` used)
+    model_id: str  # directory name (the id `spark download` used)
     registered: bool
-    hf_repo: str           # from the registry entry; "" when unregistered
+    hf_repo: str  # from the registry entry; "" when unregistered
     incomplete_files: int  # surviving *.incomplete resume fragments
     bytes_present: int
 

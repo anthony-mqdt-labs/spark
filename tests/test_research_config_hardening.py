@@ -123,8 +123,10 @@ def test_provider_spawn_failure_is_typed_with_remediation():
 
 def test_provider_nonzero_exit_is_typed_with_remediation():
     defn = ResearchProviderDef(
-        name="fake", command=[sys.executable, "-c", "import sys; sys.exit(7)"],
-        prompt_via="stdin", parse="raw_json",
+        name="fake",
+        command=[sys.executable, "-c", "import sys; sys.exit(7)"],
+        prompt_via="stdin",
+        parse="raw_json",
     )
     with pytest.raises(ResearchProviderError) as e:
         CliAgentProvider(defn).research(_request())
@@ -148,16 +150,16 @@ class _FakeProvider(ResearchProvider):
 
 
 def _request():
-    return ResearchRequest(
-        hf_repo="org/m", host_summary={"chip": "M2"}, runtime_names=["mlx_lm"]
-    )
+    return ResearchRequest(hf_repo="org/m", host_summary={"chip": "M2"}, runtime_names=["mlx_lm"])
 
 
 def _missing_binary_provider():
     return CliAgentProvider(
         ResearchProviderDef(
-            name="missing", command=["/definitely/not/a/real/provider-binary"],
-            prompt_via="stdin", parse="raw_json",
+            name="missing",
+            command=["/definitely/not/a/real/provider-binary"],
+            prompt_via="stdin",
+            parse="raw_json",
         )
     )
 
@@ -181,7 +183,7 @@ def test_unknown_config_key_is_typed_with_remediation(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setenv("SPARK_HOME", str(home))
     paths = resolve_paths().ensure()
-    paths.user_config_file.write_text('[general]\nbogus_key = 1\n', encoding="utf-8")
+    paths.user_config_file.write_text("[general]\nbogus_key = 1\n", encoding="utf-8")
     with pytest.raises(ConfigError) as e:
         load_config(paths)
     assert e.value.remediation
@@ -204,9 +206,7 @@ def cli_home(tmp_path, monkeypatch):
     home = tmp_path / "home"
     monkeypatch.setenv("SPARK_HOME", str(home))
     paths = resolve_paths().ensure()
-    monkeypatch.setattr(
-        "spark.research.validate.known_flags", lambda *a, **k: {"--max-tokens"}
-    )
+    monkeypatch.setattr("spark.research.validate.known_flags", lambda *a, **k: {"--max-tokens"})
     save_model(
         ModelEntry(id="m", hf_repo="org/m", backend="mlx_lm", model_format="mlx"),
         paths,

@@ -22,8 +22,12 @@ def secret_group():
 
 @secret_group.command(name="set")
 @click.argument("name")
-@click.option("--stdin", "from_stdin", is_flag=True,
-              help="Read the value from stdin instead of an interactive prompt.")
+@click.option(
+    "--stdin",
+    "from_stdin",
+    is_flag=True,
+    help="Read the value from stdin instead of an interactive prompt.",
+)
 def secret_set(name: str, from_stdin: bool):
     """Store/overwrite a secret. Value is never taken from argv."""
     ctx = build_context()
@@ -42,8 +46,9 @@ def secret_set(name: str, from_stdin: bool):
     ctx.secrets.set(name, value)
     # value goes out of scope; it was registered for redaction inside the store.
     ctx.telemetry.info("cli", "secret_set", name=name)
-    console.print(f"[green]✓[/green] stored secret [cyan]{name}[/cyan] in "
-                  f"{ctx.secrets.backend_name}")
+    console.print(
+        f"[green]✓[/green] stored secret [cyan]{name}[/cyan] in {ctx.secrets.backend_name}"
+    )
 
 
 @secret_group.command(name="ls")
@@ -77,8 +82,7 @@ def secret_get(name: str, reveal: bool):
     if not reveal:
         exists = ctx.secrets.exists(name)
         console.print(
-            f"[cyan]{name}[/cyan]: "
-            + ("[green]set[/green]" if exists else "[red]not set[/red]")
+            f"[cyan]{name}[/cyan]: " + ("[green]set[/green]" if exists else "[red]not set[/red]")
         )
         return
     value = ctx.secrets.get(name)

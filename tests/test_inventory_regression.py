@@ -4,9 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from spark.config.loader import load_config
 from spark.config.schema import ModelEntry
 from spark.inventory import build_inventory, resolve_for_run
+from spark.registry.availability import Availability
 from spark.registry.models import save_model
 import spark.registry.availability as availability
 
@@ -34,9 +34,7 @@ def test_with_bytes_false_does_not_walk_weights(paths, config, one_weights_model
 
 def test_with_bytes_true_still_reports_size(paths, config, one_weights_model):
     inv = build_inventory(paths, config, with_bytes=True)
-    assert [(e.id, a.bytes_present) for e, a in inv.runnable_registered] == [
-        ("fast-model", 1024)
-    ]
+    assert [(e.id, a.bytes_present) for e, a in inv.runnable_registered] == [("fast-model", 1024)]
 
 
 def test_resolve_for_run_exposes_the_inventory_it_built(paths, config, one_weights_model):
@@ -45,3 +43,22 @@ def test_resolve_for_run_exposes_the_inventory_it_built(paths, config, one_weigh
     assert hit is not None
     assert hit.inventory is not None
     assert "fast-model" in hit.inventory.runnable_ids
+
+
+def test_build_inventory_reuses_precomputed_entries_and_avail(
+    paths, config, one_weights_model, monkeypatch
+):
+    """The catalog's map can be passed in; nothing is computed twice."""
+    entries = [ModelEntry(id="fast-model", path=str(one_weights_model))]
+    avail = {
+        "fast-model": Availability(
+            state="local", detail="", location=str(one_weights_model), bytes_present=1
+        )
+    }
+
+    def no_map(*args, **kwargs):
+        raise AssertionError("precomputed availability must not be recomputed")
+
+    monkeypatch.setattr(availability, "availability_map", no_map)
+    inv = build_inventory(paths, config, with_bytes=False, entries=entries, avail=avail)
+    assert [e.id for e, _ in inv.runnable_registered] == ["fast-model"]

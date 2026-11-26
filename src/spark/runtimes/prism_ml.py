@@ -62,7 +62,8 @@ class PrismMlBackend(Backend):
     def prepare(self, entry: ModelEntry, *, secrets=None) -> None:
         pack = self.pack_dir(entry)  # fail fast with remediation, before spawn
         missing = [
-            n for n in ("model.safetensors", "tokenizer.json", "chat_template.jinja")
+            n
+            for n in ("model.safetensors", "tokenizer.json", "chat_template.jinja")
             if not (pack / n).is_file()
         ]
         if not (pack / "runtime" / "artifact.py").is_file():
@@ -93,9 +94,13 @@ class PrismMlBackend(Backend):
         return [
             self.rt.server.binary,
             str(shim_path()),
-            "--pack", self.resolve_model_ref(entry),
-            "--host", host,
-            "--port", str(port),
-            "--model-id", entry.id,
+            "--pack",
+            self.resolve_model_ref(entry),
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--model-id",
+            entry.id,
             *override_flags(entry.launch_overrides),
         ]

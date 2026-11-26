@@ -8,11 +8,17 @@ Root behavior:
 
 from __future__ import annotations
 
+import json
+import os
+import re
 import sys
+import traceback
+from pathlib import Path
 
 import click
 
 from ..errors import SparkError
+from ..registry.adopt_errors import adopt_miss_error as _adopt_miss_error
 from .completion import complete_command, completion_command
 from .config_cmd import config_group
 from .context import build_context
@@ -33,14 +39,17 @@ class SparkGroup(click.Group):
         except click.UsageError:
             if args and not args[0].startswith("-"):
                 run = self.get_command(ctx, "run")
+                if run is None:
+                    raise
                 # Treat the whole arg vector as `run <args...>`.
                 return run.name, run, args
             raise
 
 
 @click.command(name="list")
-@click.option("--all", "show_all", is_flag=True,
-              help="Show missing entries and non-servable cache in full.")
+@click.option(
+    "--all", "show_all", is_flag=True, help="Show missing entries and non-servable cache in full."
+)
 def list_command(show_all: bool):
     """List what this host can actually serve (disk truth, registry or not)."""
     from ..inventory import build_inventory
@@ -52,20 +61,33 @@ def list_command(show_all: bool):
         runnable_table,
     )
 
+    invalid: list[tuple[Path, str]] = []
+
+    def _note_invalid(path: Path, detail: str) -> None:
+        invalid.append((path, detail))
+
     ctx = build_context()
-    inv = build_inventory(ctx.paths, ctx.config)
+    inv = build_inventory(ctx.paths, ctx.config, on_invalid=_note_invalid)
     if inv.runnable_registered or inv.runnable_discovered or inv.external or inv.unverifiable:
         console.print(runnable_table(inv))
     else:
         console.print("[dim]nothing runnable on disk — try `spark download <hf-repo>`[/dim]")
     render_inventory_notes(inv, verbose=show_all)
+    for path, detail in invalid:
+        # One line per skipped file: a hand-edit typo must not silently hide a model.
+        console.print(
+            f"[yellow]![/yellow] skipped invalid registry entry {path.name}: "
+            f"{detail.splitlines()[0] if detail else 'unknown validation error'}"
+        )
     render_store_issues(scan_store(ctx.paths))
     # Keep the published roster in step with what the operator just looked at.
     refresh_catalog(ctx)
 
 
 @click.command(name="catalog")
-@click.option("--json", "as_json", is_flag=True, help="Print the catalog JSON instead of a summary.")
+@click.option(
+    "--json", "as_json", is_flag=True, help="Print the catalog JSON instead of a summary."
+)
 @click.option("--refresh/--no-refresh", default=True, help="Regenerate before printing.")
 def catalog_command(as_json: bool, refresh: bool):
     """Print the live model catalog (the machine-readable roster).
@@ -73,8 +95,6 @@ def catalog_command(as_json: bool, refresh: bool):
     Same data consumers read from `<data>/catalog.json`: every registered model
     with its availability as of now, plus any live instances.
     """
-    import json as _json
-
     from ..catalog import build_catalog, write_catalog
 
     ctx = build_context()
@@ -85,7 +105,7 @@ def catalog_command(as_json: bool, refresh: bool):
 
         path = catalog_path(ctx.paths)
     if as_json:
-        console.print_json(_json.dumps(build_catalog(ctx.paths, ctx.config)))
+        console.print_json(json.dumps(build_catalog(ctx.paths, ctx.config)))
         return
     cat = build_catalog(ctx.paths, ctx.config)
     console.print(f"[bold]catalog[/bold] [dim]{path}[/dim]")
@@ -105,250 +125,11 @@ def catalog_command(as_json: bool, refresh: bool):
     missing = [m for m in cat["models"] if not m["availability"]["ok"]]
     console.print(f"  models: {len(cat['models'])} registered, {len(missing)} without weights")
     if cat.get("discovered"):
-        console.print(f"  discovered: {len(cat['discovered'])} on-disk model(s) not in the registry")
+        console.print(
+            f"  discovered: {len(cat['discovered'])} on-disk model(s) not in the registry"
+        )
         for d in cat["discovered"]:
             console.print(f"    • [cyan]{d['id']}[/cyan] [dim]({d['source']})[/dim]")
-
-
-def _adopt_registry_exact(target: str, registered):
-    """The registry row this query already names (id, alias, repo or path)."""
-    tl = target.lower()
-    for entry, avail in registered:
-        if entry.id.lower() == tl:
-            return entry, avail
-        if any(alias.lower() == tl for alias in entry.aliases):
-            return entry, avail
-        if (entry.hf_repo or "").lower() == tl:
-            return entry, avail
-        loc = getattr(avail, "location", "") or ""
-        if loc and (loc == target or loc.lower() == tl):
-            return entry, avail
-        if entry.path and (entry.path == target or entry.path.lower() == tl):
-            return entry, avail
-    return None
-
-
-def _adopt_non_servable_hits(target: str, inv):
-    tl = target.lower()
-    exact = [m for m in inv.non_servable if m.display_id.lower() == tl]
-    if exact:
-        return exact
-    tails = [
-        m for m in inv.non_servable
-        if m.display_id.lower().split("/")[-1] == tl
-    ]
-    if tails:
-        return tails
-    prefix = [m for m in inv.non_servable if m.display_id.lower().startswith(tl)]
-    return prefix or [m for m in inv.non_servable if tl in m.display_id.lower()]
-
-
-def _adopt_registered_error(repo: str, entry, avail):
-    """The exact query is already registered — explain its state precisely."""
-    from ..errors import AlreadyRegisteredError
-
-    backend = entry.backend or "auto"
-    research = entry.research_status
-    state = getattr(avail, "state", "?")
-    detail = getattr(avail, "detail", "")
-    location = getattr(avail, "location", "") or ""
-    if state == "missing":
-        weights = f"weights missing ({detail})" if detail else "weights missing"
-    elif state in ("local", "hub"):
-        weights = f"weights present ({state}{f': {location}' if location else ''})"
-    elif state == "external":
-        weights = f"weights owned by '{entry.backend}' runtime"
-    elif state == "unverifiable":
-        weights = "entry declares neither path nor hf_repo"
-    else:
-        weights = f"weights state: {state}"
-    message = (
-        f"'{repo}' is already registered as '{entry.id}' — nothing to adopt.\n"
-        f"backend: {backend} · research: {research} · {weights}"
-    )
-    if state == "missing":
-        remediation = (
-            [f"Fetch weights: spark download {entry.hf_repo}"] if entry.hf_repo else []
-        )
-        remediation += [f"Drop the entry: spark forget {entry.id}"]
-    elif research == "pending":
-        # `pending` is research state, not download state — the original confusion.
-        remediation = [
-            f"Weights are on disk — no adopt needed. Research next: spark research {entry.id}",
-            f"Or just run it: spark run {entry.id}",
-        ]
-    else:
-        remediation = [f"Run it: spark run {entry.id}"]
-    return AlreadyRegisteredError(
-        message,
-        remediation=remediation,
-        context={
-            "query": repo,
-            "model_id": entry.id,
-            "backend": entry.backend,
-            "research_status": research,
-            "availability": state,
-            "location": location,
-        },
-    )
-
-
-def _adopt_miss_error(repo: str, inv, ctx) -> SparkError:
-    """State-aware error for `spark adopt <query>` when nothing was adopted.
-
-    The old message always said "nothing adoptable", even when the query was
-    already registered (the common confusion: the `status` column shows
-    research state — `pending` — not download state). Report what the query
-    actually is: already registered (with backend/research/weights state),
-    cached-but-not-servable, a partial store download, an incomplete hub
-    snapshot, or genuinely unknown.
-    """
-    from pathlib import Path
-
-    from ..errors import AmbiguousModelError, ModelNotFoundError
-    from ..registry.models import fuzzy_match
-
-    target = repo.strip()
-    tl = target.lower()
-
-    registered = [
-        (e, a)
-        for group in (
-            inv.runnable_registered,
-            inv.missing,
-            inv.external,
-            inv.unverifiable,
-        )
-        for e, a in group
-    ]
-
-    hit = _adopt_registry_exact(target, registered)
-    if hit is not None:
-        return _adopt_registered_error(repo, *hit)
-
-    # Ambiguous registry query (adopt takes one model).
-    _hit, candidates = fuzzy_match(repo, [(e.id, e) for e, _ in registered])
-    if len(candidates) > 1:
-        ids = sorted({e.id for e in candidates})
-        return AmbiguousModelError(
-            f"'{repo}' matches multiple registered models.",
-            remediation=[f"Be more specific: {', '.join(ids)}"],
-            context={"query": repo, "matches": ids},
-        )
-
-    # Cached repos spark cannot serve (embedders, speech). Never adoptable,
-    # but the query *is* on disk — say so instead of "nothing matches".
-    ns_hits = _adopt_non_servable_hits(target, inv)
-    if ns_hits:
-        m = ns_hits[0]
-        others = f" (+{len(ns_hits) - 1} more)" if len(ns_hits) > 1 else ""
-        return ModelNotFoundError(
-            f"'{repo}' is cached as '{m.display_id}'{others} but spark cannot serve it "
-            f"({m.kind}) — {m.reason}. Nothing to adopt.",
-            remediation=[
-                "Adoptable models are the unregistered runnable rows of: spark list",
-                "Inspect the hidden cache: spark list --all",
-            ],
-            context={"query": repo, "kind": m.kind, "reason": m.reason},
-        )
-
-    # Partial / orphaned store dirs own their message (resume, don't adopt).
-    try:
-        from ..registry.store import scan_store
-
-        issues = scan_store(ctx.paths)
-    except OSError:
-        issues = []
-    for issue in issues:
-        if (
-            issue.model_id.lower() == tl
-            or str(issue.path) == target
-            or issue.model_id.lower().split("/")[-1] == tl
-        ):
-            if issue.incomplete_files:
-                resume = (
-                    f"spark download {issue.hf_repo}"
-                    if issue.hf_repo
-                    else f"spark download <hf-repo> --id {issue.model_id}"
-                )
-                return ModelNotFoundError(
-                    f"'{repo}' is an incomplete download in the model store "
-                    f"({issue.incomplete_files} resume fragment(s)) — resume it, don't adopt it.",
-                    remediation=[
-                        f"Resume: {resume}",
-                        f"Clean: rm -rf {issue.path}",
-                    ],
-                    context={"query": repo, "path": str(issue.path)},
-                )
-            return ModelNotFoundError(
-                f"'{repo}' is in the model store but has no servable snapshot "
-                f"({issue.path}) — nothing to adopt yet.",
-                remediation=[
-                    "Adoptable models are the unregistered runnable rows of: spark list",
-                    f"Clean: rm -rf {issue.path}",
-                ],
-                context={"query": repo, "path": str(issue.path)},
-            )
-
-    # Hub cache dir exists but no complete snapshot (mid-download / reclaimed).
-    if "/" in target:
-        try:
-            from ..hf_cache import repo_dir, snapshot_dir
-
-            if repo_dir(target).is_dir() and snapshot_dir(target) is None:
-                return ModelNotFoundError(
-                    f"'{repo}' is in the HF hub cache but has no complete snapshot "
-                    f"(no config.json) — interrupted download or reclaimed weights.",
-                    remediation=[
-                        f"Resume: spark download {target}",
-                        "Adoptable models are the unregistered runnable rows of: spark list",
-                    ],
-                    context={"query": repo},
-                )
-        except OSError:
-            pass
-        # Case-insensitive hub hit (hub ids are case-sensitive on disk, but the
-        # operator often retypes them lowercased): point at the real row.
-        try:
-            from ..hf_cache import hf_cache_root
-
-            root = hf_cache_root()
-            want = target.replace("/", "--").lower()
-            if root.is_dir():
-                for d in root.iterdir():
-                    if d.name.startswith("models--") and d.name[len("models--"):].lower() == want:
-                        real = d.name[len("models--"):].replace("--", "/")
-                        return ModelNotFoundError(
-                            f"Nothing adoptable matches '{repo}' (case differs from cached '{real}').",
-                            remediation=[
-                                f"Check the exact row: spark list | grep -i {Path(target).name}",
-                                "Adoptable models are the unregistered runnable rows of: spark list",
-                            ],
-                            context={"query": repo, "cached": real},
-                        )
-        except OSError:
-            pass
-
-    if inv.runnable_discovered:
-        sample = ", ".join(m.display_id for m in inv.runnable_discovered[:5])
-        more = f" (+{len(inv.runnable_discovered) - 5} more)" if len(inv.runnable_discovered) > 5 else ""
-        return ModelNotFoundError(
-            f"Nothing adoptable matches '{repo}'.",
-            remediation=[
-                f"Adoptable now: {sample}{more}",
-                "Adoptable models are the unregistered rows of: spark list",
-                f"Or download it first: spark download {repo}",
-            ],
-            context={"query": repo},
-        )
-    return ModelNotFoundError(
-        f"Nothing adoptable matches '{repo}'.",
-        remediation=[
-            "Adoptable models are the unregistered rows of: spark list",
-            f"Or download it first: spark download {repo}",
-        ],
-        context={"query": repo},
-    )
 
 
 @click.command(name="adopt")
@@ -362,8 +143,6 @@ def adopt_command(repo: str, model_id: str | None, backend: str):
     The weights stay where they are; this only writes the registry entry so the
     model keeps a backend, research provenance, and a short id.
     """
-    import re
-
     from ..config.schema import ModelEntry
     from ..errors import AlreadyRegisteredError, ConfigError
     from ..inventory import build_inventory, infer_quant_and_params
@@ -382,7 +161,6 @@ def adopt_command(repo: str, model_id: str | None, backend: str):
     # it persists carries a real size for the memory/disk gates.
     inv = build_inventory(ctx.paths, ctx.config, with_bytes=True)
     target = repo.strip()
-    tl = target.lower()
     # Exact on-disk location first, then the shared fuzzy rule (exact id, unique
     # prefix/substring, unique repo tail) — identical to `run` and `registry`.
     found = next((m for m in inv.runnable_discovered if m.location == target), None)
@@ -392,7 +170,10 @@ def adopt_command(repo: str, model_id: str | None, backend: str):
         )
     if found is None:
         raise _adopt_miss_error(repo, inv, ctx)
-    slug = model_id or re.sub(r"[^A-Za-z0-9_.-]+", "-", found.display_id.split("/")[-1]).strip("-").lower()
+    slug = (
+        model_id
+        or re.sub(r"[^A-Za-z0-9_.-]+", "-", found.display_id.split("/")[-1]).strip("-").lower()
+    )
     clash = next((m for m in list_models(ctx.paths) if m.id == slug), None)
     if clash is not None:
         raise AlreadyRegisteredError(
@@ -415,7 +196,9 @@ def adopt_command(repo: str, model_id: str | None, backend: str):
     save_model(entry, ctx.paths)
     ctx.telemetry.info("registry", "adopted", model_id=slug, source=found.source)
     refresh_catalog(ctx, model_id=slug)
-    console.print(f"[green]✓[/green] adopted [cyan]{found.display_id}[/cyan] as [cyan]{slug}[/cyan]")
+    console.print(
+        f"[green]✓[/green] adopted [cyan]{found.display_id}[/cyan] as [cyan]{slug}[/cyan]"
+    )
     console.print(f"  [dim]research next: spark research {slug}[/dim]")
 
 
@@ -435,7 +218,8 @@ def forget_command(model: str):
     ctx = build_context()
     entry = resolve_model(model, ctx.paths)  # exact -> alias -> unique prefix
     avail = resolve_availability(
-        entry, ctx.paths,
+        entry,
+        ctx.paths,
         requires_weights=requires_weights_for(entry, ctx.config),
     )
     removed = delete_model(entry.id, ctx.paths)
@@ -443,8 +227,11 @@ def forget_command(model: str):
         console.print(f"[yellow]no registry entry for {entry.id}[/yellow]")
         return
     ctx.telemetry.info(
-        "registry", "forgotten",
-        model_id=entry.id, state=avail.state, location=avail.location,
+        "registry",
+        "forgotten",
+        model_id=entry.id,
+        state=avail.state,
+        location=avail.location,
     )
     refresh_catalog(ctx, model_id=entry.id)
     console.print(f"[green]✓[/green] forgot [cyan]{entry.id}[/cyan] (registry entry removed)")
@@ -455,7 +242,6 @@ def forget_command(model: str):
         )
     else:
         console.print("  [dim]no weights were on disk[/dim]")
-
 
 
 @click.group(cls=SparkGroup, invoke_without_command=True)
@@ -484,8 +270,9 @@ cli.add_command(complete_command)
 
 def main() -> None:
     try:
-        cli.standalone_mode = False
-        cli()
+        # Pass the mode to main() rather than mutating the group object: click
+        # re-raises SparkError so our {what/why/do-this-next} renderer can own it.
+        cli(standalone_mode=False)
     except SparkError as exc:
         # Actionable {what/why/do-this-next} rendering + structured log.
         try:
@@ -513,9 +300,6 @@ def main() -> None:
 def _render_unexpected(exc: Exception) -> None:
     """An exception spark did not type is a spark bug — still leave
     {what, why, do-this-next} and a log record a post-hoc diagnosis can use."""
-    import os
-    import traceback
-
     from ..redaction import scrub_string
 
     raw_message = str(exc)
@@ -526,9 +310,12 @@ def _render_unexpected(exc: Exception) -> None:
         from ..telemetry import get_telemetry
 
         get_telemetry().critical(
-            "cli", "unexpected_error",
-            error_type=type(exc).__name__, message=message,
-            file=where.filename if where else "", line=where.lineno if where else 0,
+            "cli",
+            "unexpected_error",
+            error_type=type(exc).__name__,
+            message=message,
+            file=where.filename if where else "",
+            line=where.lineno if where else 0,
             context_window=get_telemetry().context_window()[-10:],
         )
     except Exception:  # noqa: BLE001
@@ -536,14 +323,16 @@ def _render_unexpected(exc: Exception) -> None:
     if os.environ.get("SPARK_DEBUG"):
         # A traceback can interpolate exception arguments, including a secret.
         print(scrub_string("".join(traceback.format_exception(exc))))
-    render_error(SparkError(
-        f"Unexpected internal error: {type(exc).__name__}: {scrub_string(raw_message[:200])}",
-        code="SPARK_INTERNAL",
-        remediation=[
-            "Re-run with SPARK_DEBUG=1 for the full traceback.",
-            "The failure is logged as `unexpected_error` under the data dir's logs/cli/.",
-        ],
-    ))
+    render_error(
+        SparkError(
+            f"Unexpected internal error: {type(exc).__name__}: {scrub_string(raw_message[:200])}",
+            code="SPARK_INTERNAL",
+            remediation=[
+                "Re-run with SPARK_DEBUG=1 for the full traceback.",
+                "The failure is logged as `unexpected_error` under the data dir's logs/cli/.",
+            ],
+        )
+    )
 
 
 if __name__ == "__main__":

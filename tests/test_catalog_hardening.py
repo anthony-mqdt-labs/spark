@@ -5,25 +5,28 @@ Four failure modes are pinned here:
 * a fixed ``catalog.json.tmp`` path that two writers race on, briefly exposing
   world-readable content before ``chmod``;
 * an inventory scan failure silently publishing an empty ``discovered`` roster;
-* a recycled PID making a stale instance manifest look live;
-* duplicated "publishing is a courtesy" error handling at call sites.
+* a SIGKILLed publisher leaving a stale instance manifest that looks live;
+* duplicated "publishing is a courtesy" error handling at call sites;
+* two availability maps (and two hub scans) per catalog build.
 
 Written before the fixes; each test fails on the unhardened module.
 """
 
 from __future__ import annotations
 
+import fcntl
 import json
 import os
-import time
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 import spark.catalog as catalog
+import spark.inventory as inventory
+import spark.registry.availability as availability
 from spark.config.schema import ModelEntry
-from spark.errors import SparkError
+from spark.errors import CatalogError, SparkError
 from spark.registry import save_model
 
 
@@ -41,9 +44,7 @@ class _Recorder:
 def warnings(monkeypatch) -> _Recorder:
     """Capture telemetry warnings regardless of where catalog imports it from."""
     rec = _Recorder()
-    monkeypatch.setattr(
-        "spark.telemetry.jsonl.get_telemetry", lambda: rec, raising=False
-    )
+    monkeypatch.setattr("spark.telemetry.jsonl.get_telemetry", lambda: rec, raising=False)
     monkeypatch.setattr("spark.telemetry.get_telemetry", lambda: rec, raising=False)
     monkeypatch.setattr(catalog, "get_telemetry", lambda: rec, raising=False)
     return rec
@@ -161,16 +162,17 @@ def test_inventory_failure_keeps_last_known_good_and_warns(paths, warnings, monk
     assert payload["error_type"] == "OSError"
 
 
-def test_inventory_failure_without_prior_catalog_raises_typed_error(
-    paths, warnings, monkeypatch
-):
+def test_inventory_failure_without_prior_catalog_raises_typed_error(paths, warnings, monkeypatch):
     _seed(paths, "m")
     _break_inventory(monkeypatch)
 
-    with pytest.raises(SparkError) as caught:
+    with pytest.raises(CatalogError) as caught:
         catalog.write_catalog(paths)
 
+    assert isinstance(caught.value, SparkError)
+    assert caught.value.code == "RUN_CATALOG"
     assert caught.value.remediation, "typed error needs do-this-next steps"
+    assert caught.value.context["data_dir"] == str(paths.data_dir)
     assert not catalog.catalog_path(paths).exists()
     assert warnings.events[-1][2]["error_type"] == "OSError"
 
@@ -184,50 +186,9 @@ def test_inventory_failure_does_not_publish_empty_roster(paths, warnings, monkey
     assert not catalog.catalog_path(paths).exists()
 
 
-# --- 3. PID recycling ------------------------------------------------------------
-def test_recycled_pid_is_filtered_out(paths, monkeypatch):
-    now = time.time()
-    monkeypatch.setattr(catalog, "_process_start_epoch", lambda pid: now)
-    # Same PID is alive, but this record belongs to a process that started an
-    # hour ago — the PID has been reused since the manifest was written.
-    catalog.publish_instance(paths, _record(pid_started_at=now - 3600))
-    assert [r["model_alias"] for r in catalog.read_instances(paths)] == []
-
-
-def test_matching_pid_start_is_kept(paths, monkeypatch):
-    now = time.time()
-    monkeypatch.setattr(catalog, "_process_start_epoch", lambda pid: now)
-    catalog.publish_instance(paths, _record(pid_started_at=now - 0.5))
-    assert [r["model_alias"] for r in catalog.read_instances(paths)] == ["m-live"]
-
-
-def test_legacy_record_without_pid_started_at_is_kept(paths, monkeypatch):
-    monkeypatch.setattr(
-        catalog, "_process_start_epoch", lambda pid: pytest.fail("should not be called")
-    )
-    catalog.publish_instance(paths, _record())  # no optional field
-    assert [r["model_alias"] for r in catalog.read_instances(paths)] == ["m-live"]
-
-
-def test_start_lookup_failure_never_raises_from_read_instances(paths, monkeypatch):
-    def broken(pid):
-        raise OSError("ps unavailable")
-
-    monkeypatch.setattr(catalog, "_process_start_epoch", broken)
-    catalog.publish_instance(paths, _record(pid_started_at=time.time()))
-    assert [r["model_alias"] for r in catalog.read_instances(paths)] == ["m-live"]
-
-
-def test_pid_started_at_is_an_optional_additive_field():
-    assert "pid_started_at" not in _record()  # legacy / consumer field set intact
-    rec = _record(pid_started_at=1234.5)
-    assert rec["pid_started_at"] == 1234.5
-    assert rec["schema_version"] == catalog.SCHEMA_VERSION
-
-
-def test_publisher_records_the_process_start_time(paths, monkeypatch):
-    monkeypatch.setattr(catalog, "_process_start_epoch", lambda pid: 4321.0)
-    pub = catalog.InstancePublisher(
+# --- 3. kernel flock liveness ----------------------------------------------------
+def _publisher(paths):
+    return catalog.InstancePublisher(
         paths,
         alias="m-live",
         api_model_id="org/Model",
@@ -237,30 +198,104 @@ def test_publisher_records_the_process_start_time(paths, monkeypatch):
         health_url="http://127.0.0.1:8095/v1/models",
         session_id="s1",
     )
-    path = pub.publish()
-    assert json.loads(path.read_text(encoding="utf-8"))["pid_started_at"] == 4321.0
 
 
-def test_process_start_helper_parses_and_caches(monkeypatch):
-    """The helper is monkeypatchable and uses no dependency beyond ps."""
-    assert callable(catalog._process_start_epoch)
-    called: list[int] = []
+def _sigkill(pub):
+    """The kernel drops flock on SIGKILL, but the lock file itself survives."""
+    if pub._lock_fd is not None:  # noqa: SLF001
+        os.close(pub._lock_fd)  # noqa: SLF001
+        pub._lock_fd = None  # noqa: SLF001
 
-    class Result:
-        returncode = 0
-        stdout = "Wed Nov 25 10:04:05 2026\n"
 
-    def fake_run(cmd, **kwargs):
-        called.append(1)
-        return Result()
+def test_live_publisher_holds_an_exclusive_lock(paths):
+    pub = _publisher(paths)
+    pub.publish()
+    lock = catalog.instance_lock_path(paths, "m-live")
+    assert lock.exists()
+    assert (lock.stat().st_mode & 0o777) == 0o600
+    fd = os.open(lock, os.O_RDWR)
+    try:
+        with pytest.raises(BlockingIOError):
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        os.close(fd)
+    assert [r["model_alias"] for r in catalog.read_instances(paths)] == ["m-live"]
+    pub.remove()
 
-    monkeypatch.setattr(catalog.subprocess, "run", fake_run)
-    catalog._PID_START_CACHE.clear()
-    first = catalog._process_start_epoch(os.getpid())
-    second = catalog._process_start_epoch(os.getpid())
-    assert first is not None
-    assert second == first
-    assert len(called) == 1, "short in-module cache should avoid a second ps"
+
+def test_sigkilled_publisher_record_is_filtered_out(paths):
+    """A dead owner's lock is free for the taking: the manifest must be skipped."""
+    pub = _publisher(paths)
+    pub.publish()
+    lock = catalog.instance_lock_path(paths, "m-live")
+    _sigkill(pub)  # no remove(): exactly what SIGKILL leaves behind
+    assert lock.exists(), "a SIGKILL does not unlink the lock file"
+    assert catalog.read_instances(paths) == []
+
+
+def test_remove_releases_and_unlinks_the_lock(paths):
+    pub = _publisher(paths)
+    pub.publish()
+    lock = catalog.instance_lock_path(paths, "m-live")
+    pub.remove()
+    assert not lock.exists()
+    assert not catalog.instances_dir(paths).joinpath("m-live.json").exists()
+    # A fresh publisher can own the alias again after a clean exit.
+    again = _publisher(paths)
+    again.publish()
+    assert [r["model_alias"] for r in catalog.read_instances(paths)] == ["m-live"]
+    again.remove()
+
+
+def test_legacy_record_without_lock_falls_back_to_pid_check(paths, monkeypatch):
+    catalog.publish_instance(paths, _record())  # hand-written: no lock file
+    assert not catalog.instance_lock_path(paths, "m-live").exists()
+    assert [r["model_alias"] for r in catalog.read_instances(paths)] == ["m-live"]
+
+    def dead(pid):
+        raise ProcessLookupError
+
+    monkeypatch.setattr(catalog.os, "kill", dead)
+    assert catalog.read_instances(paths) == []
+
+
+def test_lock_probe_failure_never_raises_from_read_instances(paths, monkeypatch):
+    pub = _publisher(paths)
+    pub.publish()
+
+    def broken(*args, **kwargs):
+        raise OSError("flock unavailable")
+
+    monkeypatch.setattr(catalog.fcntl, "flock", broken)
+    assert [r["model_alias"] for r in catalog.read_instances(paths)] == ["m-live"]
+
+
+def test_pid_start_fields_are_gone(paths):
+    """The published shape is back to the consumer's v1 field set."""
+    publisher = catalog.InstancePublisher(
+        paths,
+        alias="m-live",
+        api_model_id="org/Model",
+        backend="mlx_lm",
+        base_url="http://127.0.0.1:8095/v1",
+        port=8095,
+        health_url="http://127.0.0.1:8095/v1/models",
+        session_id="s1",
+    )
+    publisher.publish()
+    try:
+        published = json.loads(
+            (catalog.instances_dir(paths) / "m-live.json").read_text(encoding="utf-8")
+        )
+        assert "pid_started_at" not in published
+        assert set(published) == set(_record())
+    finally:
+        publisher.remove()
+    assert not hasattr(catalog, "_process_start_epoch")
+    assert not hasattr(catalog, "PID_START_TOLERANCE_S")
+    assert not hasattr(catalog, "subprocess")  # no more ps fork on read/heartbeat
+    with pytest.raises(TypeError):
+        _record(pid_started_at=1234.5)
 
 
 # --- 4. shared safe writer -------------------------------------------------------
@@ -271,9 +306,7 @@ def test_safe_write_catalog_returns_the_path_on_success(paths):
     assert json.loads(got.read_text(encoding="utf-8"))["models"]
 
 
-def test_safe_write_catalog_warns_and_returns_none_on_failure(
-    paths, warnings, monkeypatch
-):
+def test_safe_write_catalog_warns_and_returns_none_on_failure(paths, warnings, monkeypatch):
     def boom(*args, **kwargs):
         raise RuntimeError("write failed")
 
@@ -284,3 +317,32 @@ def test_safe_write_catalog_warns_and_returns_none_on_failure(
     assert (component, event) == ("catalog", "write_failed")
     assert payload["error_type"] == "RuntimeError"
     assert payload["model_id"] == "m"
+
+
+# --- 5. one scan per catalog build -----------------------------------------------
+def test_catalog_build_shares_one_availability_map_and_one_hub_scan(paths, monkeypatch):
+    """build_catalog computes availability once and hands it to build_inventory."""
+    calls = {"avail": 0, "hub": 0}
+    real_avail = catalog.availability_map
+    real_scan = inventory.scan_hub_cache
+
+    def counted_avail(*args, **kwargs):
+        calls["avail"] += 1
+        return real_avail(*args, **kwargs)
+
+    def no_second_map(*args, **kwargs):
+        raise AssertionError("build_inventory recomputed availability")
+
+    def counted_scan(*args, **kwargs):
+        calls["hub"] += 1
+        return real_scan(*args, **kwargs)
+
+    monkeypatch.setattr(catalog, "availability_map", counted_avail)
+    # inventory imports availability_map at call time; if it builds its own map
+    # this raises instead of silently doing the work twice.
+    monkeypatch.setattr(availability, "availability_map", no_second_map)
+    monkeypatch.setattr(inventory, "scan_hub_cache", counted_scan)
+
+    payload = catalog.build_catalog(paths)
+    assert payload["schema_version"] == catalog.SCHEMA_VERSION
+    assert calls == {"avail": 1, "hub": 1}

@@ -25,15 +25,23 @@ class ResearchChain:
         attempted = 0
         for p in self.providers:
             if not p.is_available():
-                log.info("research", "provider_skipped", provider=p.name,
-                         reason="unavailable_or_disabled")
+                log.info(
+                    "research",
+                    "provider_skipped",
+                    provider=p.name,
+                    reason="unavailable_or_disabled",
+                )
                 continue
             attempted += 1
             log.info("research", "provider_attempt", provider=p.name, repo=request.hf_repo)
             try:
                 out = p.research(request)
-                log.info("research", "provider_success", provider=p.name,
-                         recommended=out.recommended_backend)
+                log.info(
+                    "research",
+                    "provider_success",
+                    provider=p.name,
+                    recommended=out.recommended_backend,
+                )
                 return ChainResult(output=out, provider=p.name)
             except Exception as exc:
                 msg = f"{p.name}: {exc}"

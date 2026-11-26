@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 import spark.cli.app as app
 from spark.errors import SparkError
 from spark.redaction import REDACTED, register_secret_value, reset_secret_values

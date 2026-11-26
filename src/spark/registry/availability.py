@@ -125,35 +125,47 @@ def resolve_availability(
                     size = p.stat().st_size
             except OSError as exc:  # permissions, a vanished mount: report, never crash a listing
                 return Availability(
-                    state=UNVERIFIABLE, detail=f"cannot read weights ({type(exc).__name__})",
-                    location=str(p), downloadable=bool(entry.hf_repo),
+                    state=UNVERIFIABLE,
+                    detail=f"cannot read weights ({type(exc).__name__})",
+                    location=str(p),
+                    downloadable=bool(entry.hf_repo),
                 )
             if size > 0:
                 return Availability(
-                    state=LOCAL, detail="in the spark model store",
-                    location=str(p), bytes_present=size,
+                    state=LOCAL,
+                    detail="in the spark model store",
+                    location=str(p),
+                    bytes_present=size,
                     downloadable=bool(entry.hf_repo),
                 )
             return Availability(
-                state=MISSING, detail="store directory is empty",
-                location=str(p), downloadable=bool(entry.hf_repo),
+                state=MISSING,
+                detail="store directory is empty",
+                location=str(p),
+                downloadable=bool(entry.hf_repo),
             )
         return Availability(
-            state=MISSING, detail="store path does not exist",
-            location=str(p), downloadable=bool(entry.hf_repo),
+            state=MISSING,
+            detail="store path does not exist",
+            location=str(p),
+            downloadable=bool(entry.hf_repo),
         )
 
     if entry.hf_repo:
         snap = snapshot_dir(entry.hf_repo)
         if snap is not None:
             return Availability(
-                state=HUB, detail="in the HF hub cache",
-                location=str(snap), bytes_present=bytes_in(snap) if with_bytes else 0,
+                state=HUB,
+                detail="in the HF hub cache",
+                location=str(snap),
+                bytes_present=bytes_in(snap) if with_bytes else 0,
                 downloadable=True,
             )
         return Availability(
-            state=MISSING, detail="not in the HF hub cache",
-            location=entry.hf_repo, downloadable=True,
+            state=MISSING,
+            detail="not in the HF hub cache",
+            location=entry.hf_repo,
+            downloadable=True,
         )
 
     return Availability(
@@ -176,7 +188,8 @@ def availability_map(
     """
     return {
         e.id: resolve_availability(
-            e, paths,
+            e,
+            paths,
             requires_weights=requires_weights_for(e, config),
             with_bytes=with_bytes,
         )

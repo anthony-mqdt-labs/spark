@@ -192,13 +192,18 @@ spark/
 │   │                              #   (shim-only dir: a script's dir is on sys.path,
 │   │                              #   so runtimes/mlx_lm.py would shadow real mlx_lm)
 │   ├── probe/                   # host.py (capability detection + cached profile)
-│   ├── registry/                # models.py (one TOML/model, fuzzy resolve)
+│   ├── registry/                # models.py (one TOML/model, fuzzy resolve),
+│   │                            #   adopt_errors.py (typed adopt-failure factories)
 │   ├── inventory.py             # disk-first join: store + hub cache vs registry
-│   ├── runner/                  # supervisor.py (spawn/health/restart/attach/signals)
+│   ├── budget.py                # memory/disk gates + metadata hydration
+│   ├── hf_cache.py              # HF cache paths, repo-id and ref validation
+│   ├── redaction.py             # shared secret registry + scrubbing (no imports
+│   │                            #   from telemetry/ or secrets/ — avoids a cycle)
+│   ├── runner/                  # supervisor.py, server_log.py, ports.py
 │   ├── research/                # types/guard/prompt/providers/chain/staging/validate
-│   ├── telemetry/               # jsonl.py (structured logging + redaction)
+│   ├── telemetry/               # jsonl.py (structured logging; redaction imported)
 │   └── errors.py                # typed errors carrying remediation
-├── tests/                       # pytest (368 tests)
+├── tests/                       # pytest (530 tests)
 ├── spikes/                      # time-boxed evaluation spikes + the portable
 │                                #   human/emotion eval skill (spikes/README.md)
 ├── bake-offs/                   # comparative model bake-offs — quality evals,
@@ -315,6 +320,12 @@ error, which also blunts config-injection).
 2. `config/runtimes/*.toml` (one `RuntimeDef` per file; filename ≈ runtime name)
 3. `~/.config/spark/config.toml` (user overrides; may add/override runtimes)
 
+**Behavior knobs that live in TOML, not Python:** `probe.max_age_s` (host-probe
+cache TTL); `supervisor.health_probe_timeout_s`, `instance_heartbeat_s`,
+`rss_sample_ticks`, `server_log_roll_mib`; `research.flag_probe_timeout_s`.
+Launch flags, ports, quant multipliers and these policy values all live in
+`config/`; a Python literal default for them is a bug.
+
 **Path resolution** (`config/paths.py`), highest precedence first:
 1. `$SPARK_HOME` → `<root>/{config,data,cache}` (used by tests and isolation)
 2. `$XDG_CONFIG_HOME` / `$XDG_DATA_HOME` if set
@@ -331,7 +342,9 @@ because `__file__` points into the repo `src/`.
 **Data directory** (`~/.local/share/spark/`, mode 0700):
 `models/<id>.toml` · `store/<id>/` (downloaded weights) · `staging/<id>.json`
 (research awaiting review) · `logs/<component>/<date>.jsonl` · `host.toml`
-(probe cache) · `run/` · `secrets-index.json` (non-secret names only).
+(probe cache) · `run/` (including `run/locks/` — one flock per published
+endpoint, so a SIGKILLed publisher's manifest is detectable without a `ps` fork)
+· `secrets-index.json` (non-secret names only).
 
 ---
 
@@ -347,8 +360,14 @@ Rules enforced in code:
   `ctypes`** (`secrets/keychain.py`) — value stays in process memory.
   ([Decision D2](#d2-keychain-via-ctypes-not-the-security-cli).)
 - **Never in logs.** `telemetry/jsonl.py` redacts (a) any value registered via
-  `register_secret_value()` — the store registers every value it reads — and (b)
-  sensitive key names (`token`, `secret`, `password`, `authorization`, …).
+  `spark.redaction.register_secret_value()` — the store registers every value it
+  reads — and (b) sensitive key names (`token`, `secret`, `password`,
+  `authorization`, …). Registered values of four characters or more are masked
+  wherever they appear; shorter values are masked only in credential contexts
+  (`hf_token=1`, `Bearer x`). Blindly replacing a standalone `1` destroys every
+  version string (`Llama-3.1-8B`), so there is no safe context-free scrub for a
+  1–3 character token. The prompt guard still detects short values on word
+  boundaries. Do not store tokens shorter than four characters.
 - **Never in an LLM prompt.** The research path never calls `secrets.get()`, and
   `research/guard.py:assert_no_secrets()` scans every outbound prompt for
   registered values + credential patterns (`hf_`, `sk-`, `AKIA`, `ghp_`, bearer)
@@ -390,7 +409,11 @@ Adapters and their quirks:
   answers `GET /v1/models` from spark's inventory (registered ∩ present,
   mlx-servable) instead of the server's hub-cache scan — so harness pickers never
   see embeddings/speech. Everything else passes through; still one supervised
-  child (proxy exits when the backend dies, taking it down for restart).
+  child (proxy exits when the backend dies, taking it down for restart). The
+  supervisor reserves the published port with a live listening socket and hands
+  that fd to the proxy (`SPARK_LISTEN_FD` + `pass_fds`), so there is no
+  check-then-bind race for this path. Backends that bind their own port still
+  have a residual window spark cannot close without runtime cooperation.
 - **`mlx_vlm`** — `mlx_vlm.server`; vision. Its binary defaults to host `0.0.0.0`,
   so the template **pins `--host 127.0.0.1`** (no LAN exposure). Port 8081.
 - **`llama_cpp`** — resolves to a local `.gguf` file (`--model`, picks the
@@ -778,7 +801,7 @@ result), `process_crash`, `restart_scheduled`, `process_exit` (wall time, peak R
 
 ## 12. Testing
 
-`uv run pytest` — 368 tests, no live LLM/Keychain required for the suite (the
+`uv run pytest` — 530 tests, no live LLM/Keychain required for the suite (the
 Keychain roundtrip test self-skips off macOS; research uses fake providers and a
 real-subprocess JSON test that needs no model). Coverage spans: config
 merge/precedence, secret redaction + name validation, Keychain roundtrip, probe
@@ -812,6 +835,13 @@ SPARK_HOME=/tmp/sparktest uv run spark …  # isolate config/data/logs for testi
 
 `SPARK_HOME` is the test/isolation escape hatch; unset, spark uses
 `~/.config/spark` + `~/.local/share/spark`.
+
+Runtime and dev dependencies are **exact pins** (`==`) in `pyproject.toml` with a
+matching `uv.lock`; bumping one is a deliberate, vetted change (`uv lock` first).
+Ruff (E4/E7/E9/F/B, 100 columns) and pyright are configured in `pyproject.toml`;
+run `ruff check src tests`, `ruff format --check src tests`, and
+`pyright src/spark` before committing. There is no CI: this is a single-host
+personal tool.
 
 ---
 

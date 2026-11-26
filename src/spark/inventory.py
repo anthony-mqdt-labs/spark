@@ -31,7 +31,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from .config.paths import SparkPaths
 from .config.schema import ModelEntry, ModelFormat
@@ -164,10 +164,7 @@ def classify_snapshot(snap: Path) -> tuple[str, str]:
     if "tokenizer.model" in names and "tokenizer.json" not in names and not mt:
         return "stt", "speech-recognition model, not a chat model"
     weights = any(
-        n == "model.safetensors"
-        or n.endswith(".safetensors")
-        or n.endswith(".bin")
-        for n in names
+        n == "model.safetensors" or n.endswith(".safetensors") or n.endswith(".bin") for n in names
     )
     if weights and (snap / "config.json").is_file():
         # Generative by elimination: embedding/speech families are excluded
@@ -214,7 +211,7 @@ def scan_hub_cache(*, with_bytes: bool = True) -> list[DiscoveredModel]:
         return []
     out: list[DiscoveredModel] = []
     for d in dirs:
-        repo = d.name[len("models--"):].replace("--", "/")
+        repo = d.name[len("models--") :].replace("--", "/")
         try:
             snap = snapshot_dir(repo)
         except OSError:
@@ -312,9 +309,21 @@ class Inventory:
 
 
 def build_inventory(
-    paths: SparkPaths, config=None, *, with_bytes: bool = True
+    paths: SparkPaths,
+    config=None,
+    *,
+    with_bytes: bool = True,
+    entries: list[ModelEntry] | None = None,
+    avail: dict[str, "Availability"] | None = None,
+    on_invalid: Callable[[Path, str], None] | None = None,
 ) -> Inventory:
-    """Scan disk, join against the registry. Never raises on I/O trouble."""
+    """Scan disk, join against the registry. Never raises on I/O trouble.
+
+    ``entries`` / ``avail`` are an optional precomputed join (used by the
+    catalog, which already computed both). The public default path is unchanged:
+    when either is omitted it is resolved here as before. ``on_invalid`` is
+    forwarded to ``list_models`` so a UI can surface skipped entries.
+    """
     from .registry import list_models
     from .registry.availability import (
         EXTERNAL,
@@ -324,11 +333,13 @@ def build_inventory(
     )
 
     inv = Inventory()
-    try:
-        entries = list_models(paths)
-    except OSError:
-        entries = []
-    avail = availability_map(entries, paths, config=config, with_bytes=with_bytes)
+    if entries is None:
+        try:
+            entries = list_models(paths, on_invalid=on_invalid)
+        except OSError:
+            entries = []
+    if avail is None:
+        avail = availability_map(entries, paths, config=config, with_bytes=with_bytes)
 
     by_hf_repo: dict[str, ModelEntry] = {}
     by_path: dict[str, ModelEntry] = {}
@@ -446,25 +457,27 @@ def resolve_for_run(
 
     if not (query or "").strip():
         return None
-    inv = inventory if inventory is not None else build_inventory(
-        paths, config=config, with_bytes=False
+    inv = (
+        inventory
+        if inventory is not None
+        else build_inventory(paths, config=config, with_bytes=False)
     )
     # One candidate list serves exact id, alias, exact discovered name, unique
     # prefix/substring and unique repo tail — the same rule as registry/adopt.
     names: list[tuple[str, RunResolution]] = []
     for e, _ in (*inv.runnable_registered, *inv.external, *inv.unverifiable):
-        resolution = RunResolution(
-            entry=e, ephemeral=False, via="registry", inventory=inv
-        )
+        resolution = RunResolution(entry=e, ephemeral=False, via="registry", inventory=inv)
         names.append((e.id, resolution))
         names.extend((alias, resolution) for alias in e.aliases)
     for m in inv.runnable_discovered:
-        names.append((
-            m.display_id,
-            RunResolution(
-                entry=synthesize_entry(m), ephemeral=True, via=m.source, inventory=inv
-            ),
-        ))
+        names.append(
+            (
+                m.display_id,
+                RunResolution(
+                    entry=synthesize_entry(m), ephemeral=True, via=m.source, inventory=inv
+                ),
+            )
+        )
     hit, _ambiguous = fuzzy_match(query, names, tails=True)
     return hit
 

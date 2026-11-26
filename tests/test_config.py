@@ -67,3 +67,36 @@ def test_malformed_user_config_raises(tmp_path, monkeypatch):
     p.user_config_file.write_text("this is = = not toml", encoding="utf-8")
     with pytest.raises(ConfigError):
         load_config(p)
+
+
+def test_config_validate_surfaces_reserved_override_in_registry(paths, config, monkeypatch):
+    # An old entry with a bare `host` key is silently skipped by list_models;
+    # `spark config validate` must name the key and point at the file to edit.
+    from click.testing import CliRunner
+
+    from spark.cli.config_cmd import config_validate
+
+    monkeypatch.setattr("spark.cli.config_cmd.load_config", lambda: config)
+    monkeypatch.setattr("spark.cli.config_cmd.resolve_paths", lambda: paths)
+    bad = paths.models_dir / "legacy.toml"
+    bad.write_text('id = "legacy"\n[launch_overrides]\nhost = "127.0.0.1"\n', encoding="utf-8")
+    result = CliRunner().invoke(config_validate)
+    err = result.exception
+    assert result.exit_code != 0
+    assert isinstance(err, ConfigError)
+    assert "host" in err.message and "launch override" in err.message
+    assert any("legacy.toml" in step for step in err.remediation)
+
+
+def test_config_validate_accepts_valid_registry(paths, config, monkeypatch):
+    from click.testing import CliRunner
+
+    from spark.cli.config_cmd import config_validate
+    from spark.registry import save_model
+    from spark.config.schema import ModelEntry
+
+    monkeypatch.setattr("spark.cli.config_cmd.load_config", lambda: config)
+    monkeypatch.setattr("spark.cli.config_cmd.resolve_paths", lambda: paths)
+    save_model(ModelEntry(id="ok", launch_overrides={"--max-tokens": "2048"}), paths)
+    result = CliRunner().invoke(config_validate)
+    assert result.exit_code == 0, result.output

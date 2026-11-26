@@ -40,13 +40,17 @@ class MlxLmBackend(Backend):
     # health response, before calling it ready.
     lazy_loads_model = True
 
+    @property
+    def accepts_reserved_fd(self) -> bool:
+        """Only the proxy is a supervised child spark launches and can hand a
+        pre-bound listen fd to; the direct shape is the runtime's own process."""
+        return bool(self.rt.server.filter_models)
+
     def resolve_model_ref(self, entry: ModelEntry) -> str:
         # mlx_lm.server accepts a local path OR a HF repo id for --model.
         return entry.path or entry.hf_repo or entry.id
 
-    def build_launch_cmd(
-        self, entry: ModelEntry, host: str, port: int
-    ) -> list[str]:
+    def build_launch_cmd(self, entry: ModelEntry, host: str, port: int) -> list[str]:
         if not self.rt.server.filter_models:
             return super().build_launch_cmd(entry, host, port)
         ref = self.resolve_model_ref(entry)
@@ -64,11 +68,16 @@ class MlxLmBackend(Backend):
             *override_flags(entry.launch_overrides),
         ]
         return [
-            sys.executable, str(_proxy_shim()),
-            "--host", host, "--port", str(port),
-            "--upstream", f"http://127.0.0.1:{upstream_port}",
-            "--served-id", ref,
+            sys.executable,
+            str(_proxy_shim()),
+            "--host",
+            host,
+            "--port",
+            str(port),
+            "--upstream",
+            f"http://127.0.0.1:{upstream_port}",
+            "--served-id",
+            ref,
             "--",
             *inner,
         ]
-

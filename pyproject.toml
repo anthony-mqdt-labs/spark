@@ -8,13 +8,14 @@ license = { text = "Proprietary" }
 authors = [{ name = "spark operator" }]
 
 # Lean, pinned, pure-Python, no native build, no postinstall hooks.
-# spark is a *wrapper*: it orchestrates already-installed runtime CLIs via
-# subprocess and never imports mlx/vllm/llama itself.
+# Exact pins (not ranges): a dependency update is a new package and must be
+# vetted and locked deliberately. spark is a *wrapper*: it orchestrates
+# already-installed runtime CLIs via subprocess and never imports mlx/vllm/llama.
 dependencies = [
-    "click>=8.1,<9",
-    "pydantic>=2.6,<3",
-    "platformdirs>=4.2,<5",
-    "rich>=13.7,<14",
+    "click==8.4.2",
+    "pydantic==2.13.4",
+    "platformdirs==4.10.0",
+    "rich==13.9.4",
 ]
 
 [project.scripts]
@@ -22,8 +23,8 @@ spark = "spark.cli.app:main"
 
 [dependency-groups]
 dev = [
-    "pytest>=8.1,<9",
-    "pytest-cov>=5.0,<6",
+    "pytest==8.4.2",
+    "pytest-cov==5.0.0",
 ]
 
 [build-system]
@@ -44,3 +45,17 @@ addopts = "-q"
 
 [tool.uv]
 package = true
+
+# Lint/type gate: explicit, narrow rule set. E4/E7/E9/F/B catch real defects
+# without arguing about formatting; `ruff format` owns layout at 100 columns.
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "B"]
+
+[tool.pyright]
+venvPath = "."
+venv = ".venv"

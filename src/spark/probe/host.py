@@ -12,12 +12,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import platform
 import re
 import shlex
 import shutil
 import subprocess
 import time
+import tomllib
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
@@ -29,9 +31,9 @@ from ..telemetry import get_telemetry
 class RuntimeStatus:
     name: str
     available: bool
-    reason: str = ""           # why unavailable (if so)
-    path: str = ""             # resolved binary path
-    version: str = ""          # best-effort version string
+    reason: str = ""  # why unavailable (if so)
+    path: str = ""  # resolved binary path
+    version: str = ""  # best-effort version string
     install_hint: str = ""
 
 
@@ -59,7 +61,10 @@ def _sysctl(key: str) -> str:
     try:
         out = subprocess.run(
             ["sysctl", "-n", key],
-            capture_output=True, text=True, timeout=3, check=False,
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
         )
         return out.stdout.strip()
     except (OSError, subprocess.SubprocessError):
@@ -72,7 +77,6 @@ def _total_memory_bytes() -> int:
         if val.isdigit():
             return int(val)
     try:  # portable fallback
-        import os
         return os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES")
     except (ValueError, OSError, AttributeError):
         return 0
@@ -97,7 +101,10 @@ def _detect_version(binary_path: str, args: list[str], timeout: float) -> str:
     try:
         out = subprocess.run(
             [binary_path, *args],
-            capture_output=True, text=True, timeout=timeout, check=False,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
         )
         blob = f"{out.stdout}\n{out.stderr}"
         banner: list[str] = []
@@ -128,14 +135,14 @@ def _version_from_package(binary: str, package: str) -> str:
     interp = _interpreter_for(binary)
     if not interp:
         return ""
-    code = (
-        "import importlib.metadata,sys;"
-        "print(importlib.metadata.version(sys.argv[1]))"
-    )
+    code = "import importlib.metadata,sys;print(importlib.metadata.version(sys.argv[1]))"
     try:
         out = subprocess.run(
             [interp, "-c", code, package],
-            capture_output=True, text=True, timeout=10, check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -146,20 +153,23 @@ def detect_runtime(rt: RuntimeDef, *, os_name: str, arch: str) -> RuntimeStatus:
     # Host gating first — cheaper and gives a precise reason.
     if rt.requires_os and os_name not in rt.requires_os:
         return RuntimeStatus(
-            name=rt.name, available=False,
+            name=rt.name,
+            available=False,
             reason=rt.unavailable_reason or f"requires OS {rt.requires_os}",
             install_hint=rt.install_hint,
         )
     if rt.requires_arch and arch not in rt.requires_arch:
         return RuntimeStatus(
-            name=rt.name, available=False,
+            name=rt.name,
+            available=False,
             reason=rt.unavailable_reason or f"requires arch {rt.requires_arch}",
             install_hint=rt.install_hint,
         )
     path = shutil.which(rt.detect.binary)
     if not path:
         return RuntimeStatus(
-            name=rt.name, available=False,
+            name=rt.name,
+            available=False,
             reason=f"'{rt.detect.binary}' not found on PATH",
             install_hint=rt.install_hint,
         )
@@ -167,11 +177,12 @@ def detect_runtime(rt: RuntimeDef, *, os_name: str, arch: str) -> RuntimeStatus:
     if rt.detect.version_package:
         version = _version_from_package(rt.detect.binary, rt.detect.version_package)
     if not version:
-        version = _detect_version(
-            path, rt.detect.version_args, rt.detect.version_timeout_s
-        )
+        version = _detect_version(path, rt.detect.version_args, rt.detect.version_timeout_s)
     return RuntimeStatus(
-        name=rt.name, available=True, path=path, version=version,
+        name=rt.name,
+        available=True,
+        path=path,
+        version=version,
         install_hint=rt.install_hint,
     )
 
@@ -231,7 +242,10 @@ def missing_python_deps(binary: str, requires: list[str]) -> list[str]:
     try:
         out = subprocess.run(
             [interp, "-c", code, *by_module],
-            capture_output=True, text=True, timeout=10, check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return []
@@ -275,13 +289,18 @@ def probe_host(config: SparkConfig) -> HostProfile:
         status = detect_runtime(rt, os_name=os_name, arch=arch)
         profile.runtimes[name] = status
         log.info(
-            "probe", "runtime_detected",
-            runtime=name, available=status.available,
-            version=status.version, reason=status.reason,
+            "probe",
+            "runtime_detected",
+            runtime=name,
+            available=status.available,
+            version=status.version,
+            reason=status.reason,
         )
     log.info(
-        "probe", "host_profiled",
-        chip=profile.chip, arch=arch,
+        "probe",
+        "host_profiled",
+        chip=profile.chip,
+        arch=arch,
         total_memory_gib=round(profile.total_memory_bytes / 2**30, 1),
         available=profile.available_runtimes,
     )
@@ -289,7 +308,6 @@ def probe_host(config: SparkConfig) -> HostProfile:
 
 
 def _cpu_count() -> int:
-    import os
     return os.cpu_count() or 0
 
 
@@ -303,24 +321,29 @@ def _config_fingerprint(config: SparkConfig) -> str:
     blob = json.dumps(
         {
             "_probe_schema": _PROBE_SCHEMA_VERSION,
-            "runtimes": {
-                n: rt.model_dump() for n, rt in sorted(config.runtimes.items())
-            },
+            "runtimes": {n: rt.model_dump() for n, rt in sorted(config.runtimes.items())},
         },
-        sort_keys=True, default=str,
+        sort_keys=True,
+        default=str,
     )
     return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
 
 def load_or_probe(
-    config: SparkConfig, cache_path: Path, *, max_age_s: float = 86400.0,
+    config: SparkConfig,
+    cache_path: Path,
+    *,
+    max_age_s: float,
     force: bool = False,
 ) -> HostProfile:
-    """Return a cached profile if fresh and config-consistent, else re-probe."""
+    """Return a cached profile if fresh and config-consistent, else re-probe.
+
+    ``max_age_s`` is required and comes from config: a magic number here would
+    silently override the operator's ``[probe].max_age_s``.
+    """
     fp = _config_fingerprint(config)
     if not force and cache_path.exists():
         try:
-            import tomllib
             with cache_path.open("rb") as fh:
                 cached = tomllib.load(fh)
             if (
@@ -336,13 +359,14 @@ def load_or_probe(
 
 
 def _profile_from_cache(data: dict) -> HostProfile:
-    runtimes = {
-        n: RuntimeStatus(**s) for n, s in data.get("runtimes", {}).items()
-    }
+    runtimes = {n: RuntimeStatus(**s) for n, s in data.get("runtimes", {}).items()}
     return HostProfile(
-        os=data["os"], arch=data["arch"], chip=data["chip"],
+        os=data["os"],
+        arch=data["arch"],
+        chip=data["chip"],
         total_memory_bytes=data["total_memory_bytes"],
-        cpu_count=data["cpu_count"], probed_at=data["probed_at"],
+        cpu_count=data["cpu_count"],
+        probed_at=data["probed_at"],
         runtimes=runtimes,
     )
 
@@ -364,10 +388,10 @@ def _write_cache(profile: HostProfile, cache_path: Path, fingerprint: str) -> No
         lines.append(f"[runtimes.{_toml_str(name)}]")
         lines.append(f"name = {_toml_str(s.name)}")
         lines.append(f"available = {str(s.available).lower()}")
-        lines.append(f'reason = {_toml_str(s.reason)}')
-        lines.append(f'path = {_toml_str(s.path)}')
-        lines.append(f'version = {_toml_str(s.version)}')
-        lines.append(f'install_hint = {_toml_str(s.install_hint)}')
+        lines.append(f"reason = {_toml_str(s.reason)}")
+        lines.append(f"path = {_toml_str(s.path)}")
+        lines.append(f"version = {_toml_str(s.version)}")
+        lines.append(f"install_hint = {_toml_str(s.install_hint)}")
         lines.append("")
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache_path.with_suffix(cache_path.suffix + ".tmp")

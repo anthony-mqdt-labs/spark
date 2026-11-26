@@ -92,6 +92,36 @@ def is_sensitive_key(key: str) -> bool:
     return False
 
 
+def contains_registered_secret(text: str) -> bool:
+    """Whether a registered secret appears in ``text`` (prompt-guard seam).
+
+    Short values use word boundaries: a one-character token must not make every
+    prompt containing "max" or "context" look like a leak. This is the same
+    matching rule the guard and the scrubber agree on.
+    """
+    for value in secret_values():
+        if not value:
+            continue
+        if len(value) >= 4:
+            if value in text:
+                return True
+        elif re.search(rf"(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])", text):
+            return True
+    return False
+
+
+def _short_secret_context(value: str) -> re.Pattern[str]:
+    """A short secret is only scrubbed where it is credibly a credential value.
+
+    Replacing every standalone ``1``/``x`` mangles versions, quant tags and IDs
+    (``Llama-3.1-8B``); keyed contexts are precise and preserve readability.
+    """
+    return re.compile(
+        rf"(?i)([A-Za-z0-9_.-]*(?:token|secret|password|passwd|api[_-]?key|auth|bearer)"
+        rf"[A-Za-z0-9_.-]*\s*[:=]\s*[\"']?){re.escape(value)}(?![A-Za-z0-9])"
+    )
+
+
 def scrub_string(text: str) -> str:
     """Remove registered secrets and credential-shaped substrings from text."""
     values = secret_values()
@@ -102,10 +132,8 @@ def scrub_string(text: str) -> str:
                 if value in text:
                     text = text.replace(value, REDACTED)
             else:
-                text = re.sub(
-                    rf"(?<![A-Za-z0-9]){re.escape(value)}(?![A-Za-z0-9])",
-                    REDACTED,
-                    text,
+                text = _short_secret_context(value).sub(
+                    lambda match: match.group(1) + REDACTED, text
                 )
     for pattern in CREDENTIAL_PATTERNS:
         text = pattern.sub(REDACTED, text)

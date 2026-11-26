@@ -2,6 +2,7 @@
 
 Pure-TOML runtime (generic Backend): these tests pin the launch contract so
 config drift breaks loudly, not at 2am mid-route."""
+
 from __future__ import annotations
 
 import pytest

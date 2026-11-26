@@ -134,9 +134,7 @@ def test_ok_states(paths, tmp_path, monkeypatch, state):
     if state == LOCAL:
         a = resolve_availability(_store_entry(paths), paths)
     elif state == HUB:
-        a = resolve_availability(
-            _hub_entry(tmp_path, monkeypatch, files=["config.json"]), paths
-        )
+        a = resolve_availability(_hub_entry(tmp_path, monkeypatch, files=["config.json"]), paths)
     elif state == EXTERNAL:
         a = resolve_availability(
             ModelEntry(id="r", backend="darkcore"), paths, requires_weights=False

@@ -13,7 +13,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ..errors import SparkError
+from ..errors import LaunchOverrideError as LaunchOverrideError  # re-export: was defined here
+from ..errors import ModelError
 
 ModelFormat = Literal["mlx", "mlx-vlm", "gguf", "ollama", "safetensors", "prism", "any"]
 
@@ -52,27 +53,6 @@ def id_file_stem(model_id: str) -> str:
 #: rebind the server or load weights from an attacker-chosen location while
 #: still passing D11's "is this a real flag?" check.
 _RESERVED_OVERRIDE_KEYS = frozenset({"host", "port", "model"})
-
-
-class LaunchOverrideError(SparkError):
-    """A launch override tried to seize a flag spark alone owns."""
-
-    code = "CFG_OVERRIDE_FORBIDDEN"
-
-    def __init__(self, key: str) -> None:
-        self.key = key
-        super().__init__(
-            f"launch override {key!r} is reserved: bind host, port and model path "
-            "are owned by spark, not by research output.",
-            remediation=[
-                f"Remove {key!r} from launch_overrides.",
-                "Set the bind host/port in config/defaults.toml (or a user override).",
-                "Register the weights path in the model registry, not via --model.",
-                f"Discard the staged research: spark config review <model> --reject, "
-                "then re-run spark research <model>.",
-            ],
-            context={"key": key},
-        )
 
 
 def check_reserved_override_keys(v: dict[str, str]) -> dict[str, str]:
@@ -176,7 +156,7 @@ class RuntimeDef(_Strict):
     detect: DetectSpec
     server: ServerSpec
     # Host gating. Empty list = no constraint.
-    requires_os: list[str] = Field(default_factory=list)   # e.g. ["Darwin"]
+    requires_os: list[str] = Field(default_factory=list)  # e.g. ["Darwin"]
     requires_arch: list[str] = Field(default_factory=list)  # e.g. ["arm64"]
     # Shown when unavailable, to guide the operator.
     install_hint: str = ""
@@ -218,6 +198,12 @@ class DiskPolicy(_Strict):
     enforce: bool = True
 
 
+class ProbeConfig(_Strict):
+    """Host-probe cache age; owned by bundled TOML, never a Python literal."""
+
+    max_age_s: float = Field(..., gt=0)
+
+
 class GeneralConfig(_Strict):
     """Host policy owned by ``config/defaults.toml``.
 
@@ -226,7 +212,7 @@ class GeneralConfig(_Strict):
     consumer-pinned 8095 canonical endpoint).
     """
 
-    host: str                       # loopback only; no LAN exposure by default
+    host: str  # loopback only; no LAN exposure by default
     port_range: tuple[int, int]
     log_retention_days: int = Field(..., ge=1)
     # Backend preference, highest priority first. Used to pick among capable
@@ -247,6 +233,11 @@ class SupervisorPolicy(_Strict):
     backoff_base_s: float = Field(1.0, ge=0)
     backoff_max_s: float = Field(30.0, ge=0)
     health_interval_s: float = Field(5.0, gt=0)
+    # Socket timeout for a single health probe (not the interval between them).
+    health_probe_timeout_s: float = Field(..., gt=0)
+    instance_heartbeat_s: float = Field(..., gt=0)
+    rss_sample_ticks: int = Field(..., ge=1)
+    server_log_roll_mib: int = Field(..., ge=1)
     shutdown_grace_s: float = Field(10.0, ge=0)
     # A crash after this much healthy uptime gets a fresh restart budget (and
     # backoff): it is a new incident, not the same failure recurring.
@@ -281,6 +272,7 @@ class ResearchProviderDef(_Strict):
 class ResearchConfig(_Strict):
     enabled: bool = True
     model_card_chars: int = 6000
+    flag_probe_timeout_s: float = Field(..., gt=0)
     providers: list[ResearchProviderDef] = Field(default_factory=list)
 
 
@@ -290,10 +282,13 @@ class SparkConfig(_Strict):
     # Required: the whole [general] table comes from bundled TOML, never from a
     # Python literal (config is data, not code).
     general: GeneralConfig
-    memory: MemoryPolicy = Field(default_factory=MemoryPolicy)
-    disk: DiskPolicy = Field(default_factory=DiskPolicy)
-    supervisor: SupervisorPolicy = Field(default_factory=SupervisorPolicy)
-    research: ResearchConfig = Field(default_factory=ResearchConfig)
+    probe: ProbeConfig
+    # Lambdas (not class objects) so a type checker does not mistake them for
+    # `Field`'s dict-validating factory overload of the same arity.
+    memory: MemoryPolicy = Field(default_factory=lambda: MemoryPolicy())
+    disk: DiskPolicy = Field(default_factory=lambda: DiskPolicy())
+    supervisor: SupervisorPolicy = Field(default_factory=lambda: SupervisorPolicy())
+    research: ResearchConfig = Field(default_factory=lambda: ResearchConfig())
     runtimes: dict[str, RuntimeDef] = Field(default_factory=dict)
 
 
@@ -309,8 +304,10 @@ class DFlashProfile(_Strict):
     opt-in until the host warrants it. Mirrors the model's own ``backend`` +
     ``launch_overrides`` shape so it composes through the normal launch path."""
 
-    backend: str = "mlx_vlm"                                        # runtime implementing DFlash
-    launch_overrides: dict[str, str] = Field(default_factory=dict)  # drafter flags (--draft-model, …)
+    backend: str = "mlx_vlm"  # runtime implementing DFlash
+    launch_overrides: dict[str, str] = Field(
+        default_factory=dict
+    )  # drafter flags (--draft-model, …)
 
     @field_validator("launch_overrides")
     @classmethod
@@ -323,10 +320,10 @@ class ModelEntry(_Strict):
 
     id: str = Field(..., description="Short slug used on the CLI, e.g. 'ornith9b'.")
     hf_repo: str = ""
-    path: str = ""                       # local snapshot dir or GGUF file
-    backend: str = ""                    # chosen runtime name
+    path: str = ""  # local snapshot dir or GGUF file
+    backend: str = ""  # chosen runtime name
     model_format: ModelFormat = "any"
-    quant: str = ""                      # e.g. 'q4'
+    quant: str = ""  # e.g. 'q4'
     params_billions: float | None = None
     size_bytes: int | None = None
     context_length: int | None = None
@@ -352,7 +349,15 @@ class ModelEntry(_Strict):
     def with_dflash(self) -> "ModelEntry":
         """Copy configured for DFlash: the profile's backend, with its drafter
         overrides merged over the model's own. Caller ensures ``dflash`` is set."""
-        assert self.dflash is not None, "with_dflash() requires a dflash profile"
+        if self.dflash is None:
+            raise ModelError(
+                f"'{self.id}' has no [dflash] profile to enable.",
+                remediation=[
+                    "Add a [dflash] section to the model's registry entry, or "
+                    "run it without --dflash.",
+                ],
+                context={"model": self.id},
+            )
         p = self.dflash
         return self.model_copy(
             update={
