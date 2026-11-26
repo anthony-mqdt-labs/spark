@@ -7,8 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from spark.cli.doctor import _fix_python_deps
+from click.testing import CliRunner
+
+from spark.cli.doctor import _fix_python_deps, doctor_command
 from spark.config.schema import DetectSpec, RuntimeDef, ServerSpec
+from spark.errors import RuntimeBackendError
+from spark.probe.host import HostProfile, RuntimeStatus
 from spark.telemetry import init_telemetry
 
 
@@ -75,3 +79,67 @@ def test_fix_fails_when_installer_binary_absent(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert _fix_python_deps(_rt(), ["torch"], list(ARGV)) is False
+
+
+def _profile_with_mlx_vlm() -> HostProfile:
+    return HostProfile(
+        os="Darwin",
+        arch="arm64",
+        chip="Apple M2",
+        total_memory_bytes=16 * 2**30,
+        cpu_count=8,
+        probed_at=0.0,
+        runtimes={
+            "mlx_vlm": RuntimeStatus(
+                name="mlx_vlm", available=True, path="/x/mlx_vlm.server", version="0.1"
+            )
+        },
+    )
+
+
+def test_doctor_fix_calls_same_repair_path(tmp_path, monkeypatch):
+    """`doctor --fix` still routes through _fix_python_deps with the derived argv."""
+    calls = []
+    monkeypatch.setenv("SPARK_HOME", str(tmp_path))
+    monkeypatch.setattr("spark.cli.doctor.load_or_probe", lambda *a, **k: _profile_with_mlx_vlm())
+    monkeypatch.setattr(
+        "spark.cli.doctor.missing_python_deps",
+        lambda binary, reqs: ["torch", "torchvision"],
+    )
+
+    def fake_fix(rt, missing, argv):
+        calls.append((rt.name, missing, argv))
+        return True
+
+    monkeypatch.setattr("spark.cli.doctor._fix_python_deps", fake_fix)
+    result = CliRunner().invoke(
+        doctor_command,
+        ["--fix"],
+        env={"SPARK_HOME": str(tmp_path)},
+        catch_exceptions=False,
+    )
+    assert result.exit_code == 0, result.output
+    assert calls == [("mlx_vlm", ["torch", "torchvision"], ARGV)]
+
+
+def test_doctor_fix_keeps_error_semantics(tmp_path, monkeypatch):
+    """A failed repair still raises RuntimeBackendError with the same code/remediation."""
+    monkeypatch.setenv("SPARK_HOME", str(tmp_path))
+    monkeypatch.setattr("spark.cli.doctor.load_or_probe", lambda *a, **k: _profile_with_mlx_vlm())
+    monkeypatch.setattr("spark.cli.doctor.missing_python_deps", lambda binary, reqs: ["torch"])
+    monkeypatch.setattr("spark.cli.doctor._fix_python_deps", lambda *a, **k: False)
+
+    result = CliRunner().invoke(
+        doctor_command,
+        ["--fix"],
+        env={"SPARK_HOME": str(tmp_path)},
+        catch_exceptions=True,
+    )
+    err = result.exception
+    assert isinstance(err, RuntimeBackendError)
+    assert err.code == "RT_DEPS_UNFIXED"
+    assert err.remediation == [
+        "scroll up for the installer output",
+        "run the printed `uv tool install ... --with ...` command by hand",
+        "re-check with `spark doctor`",
+    ]

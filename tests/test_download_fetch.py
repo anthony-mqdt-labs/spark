@@ -215,3 +215,25 @@ def test_scan_store_flags_partial_and_orphan(paths):
     assert issues["partial"].hf_repo == "org/partial"
     assert issues["orphan"].kind == "orphaned"
     assert not issues["orphan"].registered
+
+
+# --- progress messaging (pointer-only registration: no fetch, no agents) -------
+def test_no_fetch_registration_uses_success_and_research_hint(paths, monkeypatch):
+    from click.testing import CliRunner
+
+    from spark.cli.download import download_command
+    from spark.cli.context import SparkCtx
+    from spark.telemetry import Telemetry
+
+    ctx = SparkCtx(
+        paths=paths,
+        config=load_config(),
+        secrets=None,
+        telemetry=Telemetry(paths.log_dir, session_id="test"),
+        session_id="test",
+    )
+    monkeypatch.setattr("spark.cli.download.build_context", lambda: ctx)
+    monkeypatch.setattr("spark.cli.download.refresh_catalog", lambda *a, **k: None)
+    out = CliRunner().invoke(download_command, ["org/repo", "--no-fetch", "--no-research"]).output
+    assert "✓" in out and "repo" in out
+    assert "→" in out and "spark research repo" in out

@@ -12,7 +12,7 @@ import click
 
 from ..errors import SecretError
 from .context import build_context
-from .render import console
+from .render import console, hint, success
 
 
 @click.group(name="secret")
@@ -46,9 +46,7 @@ def secret_set(name: str, from_stdin: bool):
     ctx.secrets.set(name, value)
     # value goes out of scope; it was registered for redaction inside the store.
     ctx.telemetry.info("cli", "secret_set", name=name)
-    console.print(
-        f"[green]✓[/green] stored secret [cyan]{name}[/cyan] in {ctx.secrets.backend_name}"
-    )
+    success(f"stored secret [cyan]{name}[/cyan] in {ctx.secrets.backend_name}")
 
 
 @secret_group.command(name="ls")
@@ -58,6 +56,7 @@ def secret_ls():
     names = ctx.secrets.list_names()
     if not names:
         console.print("[dim]no secrets stored[/dim]")
+        hint("spark secret set <name>", "store one")
         return
     for n in names:
         console.print(f"  • {n}")
@@ -70,7 +69,7 @@ def secret_rm(name: str):
     ctx = build_context()
     ctx.secrets.delete(name)
     ctx.telemetry.info("cli", "secret_rm", name=name)
-    console.print(f"[green]✓[/green] removed [cyan]{name}[/cyan]")
+    success(f"removed [cyan]{name}[/cyan]")
 
 
 @secret_group.command(name="get")
@@ -84,6 +83,8 @@ def secret_get(name: str, reveal: bool):
         console.print(
             f"[cyan]{name}[/cyan]: " + ("[green]set[/green]" if exists else "[red]not set[/red]")
         )
+        if not exists:
+            hint(f"spark secret set {name}", "store it")
         return
     value = ctx.secrets.get(name)
     # Deliberately bypass rich (no markup parsing of secret) and do not log.

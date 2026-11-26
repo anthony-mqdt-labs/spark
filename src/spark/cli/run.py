@@ -9,7 +9,7 @@ from ..probe.host import load_or_probe
 from ..runner import Supervisor
 from ..runtimes import entry_for_backend, get_backend, select_backend_for
 from .context import build_context
-from .render import console, render_server_log
+from .render import console, hint, render_server_log, success
 
 
 @click.command(name="run")
@@ -135,7 +135,24 @@ def run_command(model: str, backend_override: str | None, dflash: bool, force: b
         # failure reason is visible, then let the top-level renderer show the error.
         render_server_log(sup.log_path, sup.log_tail())
         raise
-    console.print(f"  [dim]spark stopped {entry.id} (restarts: {result.restarts})[/dim]")
+    except KeyboardInterrupt:
+        # The supervisor traps SIGINT/SIGTERM itself (it sets a stop event), so a
+        # KeyboardInterrupt only reaches here if a signal landed before its
+        # handler was installed. Nothing was spawned in that window; say so.
+        _print_stopped(entry.id)
+        raise
+    # Supervisor.run() terminates every child it spawned in a finally block (and
+    # removes the published instance), so a clean return means no spark-owned
+    # server process outlives this command — including the Ctrl+C path, which
+    # surfaces here as a normal "stop_requested" result, not an exception.
+    _print_stopped(entry.id, restarts=result.restarts)
+
+
+def _print_stopped(model_id: str, restarts: int | None = None) -> None:
+    """One-line shutdown confirmation plus the obvious next step."""
+    detail = f" · restarts: {restarts}" if restarts is not None else ""
+    success(f"{model_id} stopped{detail} · no spark-owned process left behind")
+    hint(f"spark run {model_id}", "start it again")
 
 
 def _print_ready(model_id: str, label: str, info) -> None:
@@ -148,16 +165,13 @@ def _print_ready(model_id: str, label: str, info) -> None:
         f"  [bold green]spark[/bold green] [dim]v{ver}[/dim]  "
         f"ready in [bold]{info.elapsed_s:.1f}s[/bold]"
     )
-    console.print()
-    console.print(f"  [green]➜[/green]  [bold]Local:[/bold]   [cyan]{info.base_url}[/cyan]")
-    console.print(f"  [green]➜[/green]  [bold]Model:[/bold]   {model_id} [dim]({label})[/dim]")
+    console.print(f"  [cyan]→[/cyan]  [bold]Local:[/bold]   [cyan]{info.base_url}[/cyan]")
+    console.print(f"  [cyan]→[/cyan]  [bold]Model:[/bold]   {model_id} [dim]({label})[/dim]")
     if info.api_model_id and info.api_model_id != model_id:
         # Store-backed models are addressed by absolute path, hub-backed ones by
         # repo id — the request body must carry this, not the spark alias.
-        console.print(f"  [green]➜[/green]  [bold]API id:[/bold]  [dim]{info.api_model_id}[/dim]")
-    console.print(f"  [green]➜[/green]  [bold]Logs:[/bold]    [dim]{info.log_path}[/dim]")
+        console.print(f"  [cyan]→[/cyan]  [bold]API id:[/bold]  [dim]{info.api_model_id}[/dim]")
+    console.print(f"  [cyan]→[/cyan]  [bold]Logs:[/bold]   [dim]{info.log_path}[/dim]")
     if info.note:
         console.print(f"  [yellow]![/yellow]  [dim]{info.note}[/dim]")
-    console.print()
-    console.print("  [dim]press Ctrl+C to stop[/dim]")
-    console.print()
+    hint("Ctrl+C", "stop the server")

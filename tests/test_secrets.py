@@ -69,3 +69,47 @@ def test_keychain_rejects_empty_value(tmp_path):
         pytest.skip("Keychain not available")
     with pytest.raises(SecretError):
         store.set("spark_pytest_empty", "")
+
+
+# --- CLI presentation (FakeStore only: never touch the real Keychain) ---------
+def _cli_ctx(paths):
+    from spark.cli.context import SparkCtx
+    from spark.config.loader import load_config
+    from spark.telemetry import Telemetry
+    from helpers import FakeStore
+
+    return SparkCtx(
+        paths=paths,
+        config=load_config(),
+        secrets=FakeStore(),
+        telemetry=Telemetry(paths.log_dir, session_id="test"),
+        session_id="test",
+    )
+
+
+def test_secret_empty_state_hints_at_set(paths, monkeypatch):
+    from click.testing import CliRunner
+
+    from spark.cli.secret import secret_ls
+
+    monkeypatch.setattr("spark.cli.secret.build_context", lambda: _cli_ctx(paths))
+    out = CliRunner().invoke(secret_ls, []).output
+    assert "no secrets stored" in out
+    assert "→" in out and "spark secret set <name>" in out
+
+
+def test_secret_set_and_remove_use_success_glyph(paths, monkeypatch):
+    from click.testing import CliRunner
+
+    from spark.cli.secret import secret_ls, secret_rm, secret_set
+
+    ctx = _cli_ctx(paths)
+    monkeypatch.setattr("spark.cli.secret.build_context", lambda: ctx)
+    runner = CliRunner()
+    stored = runner.invoke(secret_set, ["hf_token", "--stdin"], input="tok\n")
+    assert stored.exit_code == 0, stored.output
+    assert "✓" in stored.output and "hf_token" in stored.output
+    assert "hf_token" in runner.invoke(secret_ls, []).output
+    removed = runner.invoke(secret_rm, ["hf_token"])
+    assert removed.exit_code == 0, removed.output
+    assert "✓" in removed.output and "hf_token" in removed.output

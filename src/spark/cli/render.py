@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Iterator
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 from ..errors import SparkError
+from ..formatting import fmt_size, short
 
 if TYPE_CHECKING:
     from ..inventory import Inventory
@@ -70,36 +72,101 @@ def runtimes_table(profile: HostProfile) -> Table:
     return t
 
 
-def _fmt_bytes(n: int) -> str:
-    if n >= 2**30:
-        return f"{n / 2**30:.1f} GiB"
-    return f"{n / 2**20:.0f} MiB"
+# --- shared visual language -----------------------------------------------------
+# One glyph vocabulary across every command: ✓ done, ! attention, → next action.
+# Keep these helpers small and markup-only so they are safe in tests and in
+# non-interactive (piped) terminals.
+
+
+# `fmt_size` and `short` are imported from the neutral `spark.formatting` module
+# above so core code can use the same byte formatting without importing `cli/`.
+
+
+def success(message: str) -> None:
+    console.print(f"[green]✓[/green] {message}")
+
+
+def warning(message: str) -> None:
+    console.print(f"[yellow]![/yellow] {message}")
+
+
+def hint(action: str, reason: str) -> None:
+    """One actionable next step: '→ reason: command'."""
+    console.print(f"[cyan]→[/cyan] {reason}: [bold]{action}[/bold]")
+
+
+def section(title: str) -> None:
+    """A scannable section heading with breathing room above it."""
+    console.print()
+    console.print(f"[bold]{title}[/bold]")
+
+
+@contextmanager
+def working(message: str) -> Iterator[None]:
+    """TTY-aware progress for multi-second operations.
+
+    Animated spinner in an interactive terminal; one stable line when piped so
+    logs and completion callers never see control characters.
+    """
+    if console.is_terminal:
+        with console.status(message, spinner="dots"):
+            yield
+    else:
+        console.print(f"[cyan]…[/cyan] {message}")
+        yield
+
+
+def _research_label(status: str) -> str:
+    """Compact research label for the list view.
+
+    `registered` means tuned flags are applied; `staged` means a result is
+    waiting at `spark config review`; `pending` means research has not run.
+    They are distinct states and deserve distinct labels.
+    """
+    return {
+        "registered": "tuned",
+        "manual": "manual",
+        "pending": "pending",
+        "staged": "staged",
+    }.get(status, status or "pending")
 
 
 def render_store_issues(issues: list[StoreIssue]) -> None:
-    """Warn about partial/orphaned model-store dirs with resume/clean steps."""
+    """Warn about partial/orphaned store dirs, then give one fix pointer.
+
+    One scannable line per issue (truncated reason + size) followed by a single
+    `→ fix:` hint that keeps every resume/clean command available.
+    """
     if not issues:
         return
-    console.print(
-        f"[yellow]![/yellow] [bold]{len(issues)} incomplete or unregistered "
-        f"download(s) in the model store[/bold] (wasting disk, invisible to run):"
+    width = getattr(console, "width", 0) or 80
+    warning(
+        f"{len(issues)} incomplete/unregistered store download(s) — wasting disk, invisible to run"
     )
+    fixes: list[str] = []
     for i in issues:
         state = []
         if i.incomplete_files:
             state.append(f"partial ({i.incomplete_files} resume fragment(s))")
         if not i.registered:
             state.append("unregistered")
+        # Budget the reason and path together so the bullet stays a single line.
+        size = fmt_size(i.bytes_present)
+        avail = max(24, width - (10 + len(i.model_id) + len(size)))
+        reason = ", ".join(state) or "store dir has no usable snapshot"
+        reason_w = min(len(reason), max(24, avail - 20))
+        path_w = max(12, avail - reason_w)
         console.print(
-            f"  • [cyan]{i.model_id}[/cyan] — {', '.join(state)} · "
-            f"{_fmt_bytes(i.bytes_present)} on disk · {i.path}"
+            f"  • [cyan]{i.model_id}[/cyan] — {short(reason, reason_w)} · "
+            f"{size} on disk · [dim]{short(str(i.path), path_w)}[/dim]"
         )
-        resume = (
+        fixes.append(
             f"spark download {i.hf_repo}"
             if i.hf_repo
             else f"spark download <hf-repo> --id {i.model_id}"
         )
-        console.print(f"    resume: [bold]{resume}[/bold]  ·  clean: rm -rf {i.path}")
+        fixes.append(f"rm -rf {i.path}")
+    hint("  ·  ".join(fixes), "fix")
 
 
 def runnable_table(inv: Inventory) -> Table:
@@ -110,33 +177,45 @@ def runnable_table(inv: Inventory) -> Table:
     (routers, daemons) are listed too — they own their weights.
     """
     t = Table(title="Ready to run", expand=False)
-    t.add_column("id", style="cyan")
-    t.add_column("src")
-    t.add_column("backend")
-    t.add_column("size", style="dim")
-    t.add_column("status", style="dim")
+    cols = (
+        ("id", "cyan"),
+        ("src", ""),
+        ("backend", ""),
+        ("size", "dim"),
+        ("research", "dim"),
+    )
+    for name, style in cols:
+        t.add_column(name, style=style, no_wrap=True, overflow="ellipsis")
     for entry, avail in inv.runnable_registered:
         t.add_row(
             entry.id,
             "[green]weights[/green]",
             entry.backend or "auto",
-            _fmt_bytes(avail.bytes_present) if avail.bytes_present else "—",
-            entry.research_status,
+            fmt_size(avail.bytes_present) if avail.bytes_present else "—",
+            _research_label(entry.research_status),
         )
     for entry, _avail in inv.external:
         t.add_row(
-            entry.id, "[magenta]daemon[/magenta]", entry.backend or "—", "—", entry.research_status
+            entry.id,
+            "[magenta]daemon[/magenta]",
+            entry.backend or "—",
+            "—",
+            _research_label(entry.research_status),
         )
     for entry, _avail in inv.unverifiable:
         t.add_row(
-            entry.id, "[dim]unverified[/dim]", entry.backend or "auto", "—", entry.research_status
+            entry.id,
+            "[dim]unverified[/dim]",
+            entry.backend or "auto",
+            "—",
+            _research_label(entry.research_status),
         )
     for m in inv.runnable_discovered:
         t.add_row(
             m.display_id,
             f"[yellow]{m.source}[/yellow]",
             m.model_format,
-            _fmt_bytes(m.bytes_present) if m.bytes_present else "—",
+            fmt_size(m.bytes_present) if m.bytes_present else "—",
             "not registered",
         )
     return t
@@ -145,37 +224,36 @@ def runnable_table(inv: Inventory) -> Table:
 def render_inventory_notes(inv: Inventory, *, verbose: bool = False) -> None:
     """One-line pointers for everything that is *not* runnable.
 
-    Missing entries name their fix; unregistered runnable models name `adopt`;
-    non-servable cache is a count unless verbose. This keeps the default view
-    to signal (what can run) plus pointers, not pages of defects.
+    Reasons are ellipsis-truncated to the console width (never wrapped); each
+    pointer is an actionable `→` hint. Default = signal + pointer, `--all` = the
+    full per-item detail (ids, reasons, fetch/drop commands).
     """
+    width = getattr(console, "width", 0) or 80
+    w = max(24, width - 6)
+
     if inv.runnable_discovered:
-        console.print(
-            f"[dim]{len(inv.runnable_discovered)} on-disk model(s) not in the registry — "
-            f"run directly, or keep with: spark adopt <repo>[/dim]"
-        )
+        warning(f"{len(inv.runnable_discovered)} on-disk model(s) not in the registry")
+        hint("spark adopt <repo>", "run directly or keep (backend + research)")
     if inv.missing:
-        console.print(
-            f"[yellow]![/yellow] [bold]{len(inv.missing)} registered model(s) have no "
-            f"weights on this host[/bold]"
-            + (" [dim](--all for details)[/dim]" if not verbose else ":")
+        warning(
+            f"{len(inv.missing)} registered model(s) have no weights on this host"
+            + ("" if verbose else " (--all for details)")
         )
         if verbose:
             for entry, avail in inv.missing:
-                loc = f" · {avail.location}" if avail.location else ""
-                console.print(f"  • [cyan]{entry.id}[/cyan] — {avail.detail}{loc}")
+                detail = short(avail.detail or "weights missing", max(16, w - len(entry.id) - 4))
+                loc = f" [dim]· {short(avail.location, w)}[/dim]" if avail.location else ""
+                console.print(f"  • [cyan]{entry.id}[/cyan] — {detail}{loc}")
                 if entry.hf_repo:
-                    console.print(f"    fetch: [bold]spark download {entry.hf_repo}[/bold]")
-                console.print(f"    drop the entry: [bold]spark forget {entry.id}[/bold]")
+                    hint(f"spark download {entry.hf_repo}", "fetch")
+                hint(f"spark forget {entry.id}", "drop")
     if inv.non_servable and verbose:
-        console.print(
-            f"[dim]{len(inv.non_servable)} cached repo(s) spark cannot serve "
-            f"(embeddings/speech):[/dim]"
-        )
+        warning(f"{len(inv.non_servable)} cached repo(s) spark cannot serve (embeddings/speech)")
         for m in inv.non_servable:
-            console.print(f"  • [dim]{m.display_id} — {m.reason}[/dim]")
+            reason = short(m.reason or "unsupported model type", max(16, w - len(m.display_id) - 4))
+            console.print(f"  • [dim]{m.display_id} — {reason}[/dim]")
     elif inv.non_servable:
         console.print(
             f"[dim]{len(inv.non_servable)} cached repo(s) are not chat models "
-            f"(embeddings/speech) — hidden, see --all[/dim]"
+            "(embeddings/speech) — hidden, see --all[/dim]"
         )

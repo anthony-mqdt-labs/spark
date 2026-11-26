@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 import time
+from dataclasses import replace
 
 import click
 
@@ -11,6 +13,8 @@ from ..budget import GIB, free_disk_bytes, usable_memory_bytes
 from ..config.schema import RuntimeDef
 from ..errors import RuntimeBackendError
 from ..probe.host import (
+    HostProfile,
+    RuntimeStatus,
     dep_fix_command,
     load_or_probe,
     missing_python_deps,
@@ -19,7 +23,17 @@ from ..probe.host import (
 from ..registry.store import scan_store
 from ..telemetry import get_telemetry
 from .context import build_context
-from .render import console, render_store_issues, runtimes_table
+from .render import (
+    console,
+    fmt_size,
+    hint,
+    render_store_issues,
+    runtimes_table,
+    section,
+    short,
+    success,
+    warning,
+)
 
 
 @click.command(name="doctor")
@@ -42,19 +56,25 @@ def doctor_command(no_cache: bool, apply_fix: bool) -> None:
         force=no_cache,
     )
 
-    mem_total = profile.total_memory_bytes / GIB
-    mem_budget = usable_memory_bytes(profile, ctx.config.memory) / GIB
-    free = free_disk_bytes(ctx.paths.data_dir) / GIB
+    mem_total = profile.total_memory_bytes
+    mem_budget = usable_memory_bytes(profile, ctx.config.memory)
+    free = free_disk_bytes(ctx.paths.data_dir)
 
     console.print(
         f"[bold]Host[/bold]: {profile.chip}  ·  {profile.arch}  ·  "
-        f"{profile.cpu_count} cores  ·  {mem_total:.0f} GiB unified"
+        f"{profile.cpu_count} cores  ·  {fmt_size(mem_total)} unified"
     )
     console.print(
-        f"[bold]Budget[/bold]: ~{mem_budget:.1f} GiB usable for weights  ·  "
-        f"{free:.1f} GiB free disk" + ("  [yellow](low disk)[/yellow]" if free < 20 else "")
+        f"[bold]Budget[/bold]: ~{fmt_size(mem_budget)} usable for weights  ·  "
+        f"{fmt_size(free)} free disk"
     )
-    console.print(runtimes_table(profile))
+    if free < 20 * GIB:
+        warning(f"low disk: only {fmt_size(free)} free — downloads may be refused")
+
+    # Display-only copy: truncate the fields that feed the table's `detail`
+    # column so long install hints cannot wrap rows into paragraphs. The real
+    # profile (cache, repair, availability) is never mutated.
+    console.print(runtimes_table(_compact_profile(profile)))
     render_store_issues(scan_store(ctx.paths))
 
     # Runtime readiness: a runtime can be on PATH yet unable to serve because its
@@ -89,11 +109,15 @@ def doctor_command(no_cache: bool, apply_fix: bool) -> None:
         f"[bold]Secrets[/bold]: {ctx.secrets.backend_name} "
         + ("[green]available[/green]" if secret_ok else "[red]unavailable[/red]")
     )
+
+    _render_next_steps(profile)
+
     avail = profile.available_runtimes
     if not avail:
-        console.print("[yellow]No runtimes available — install one above.[/yellow]")
+        warning("no runtimes available — see Next steps above")
     else:
-        console.print(f"[green]Ready.[/green] Available: {', '.join(avail)}")
+        success(f"{len(avail)}/{len(profile.runtimes)} runtimes available")
+        hint("spark list", "next: see what you can run")
 
     if unfixed:
         raise RuntimeBackendError(
@@ -106,6 +130,72 @@ def doctor_command(no_cache: bool, apply_fix: bool) -> None:
             ],
             context={"runtimes": unfixed},
         )
+
+
+#: Installer commands a hint can be shown verbatim as a `→ install <name>: <cmd>`.
+_INSTALL_CMDS = frozenset(
+    {
+        "uv",
+        "pip",
+        "pip3",
+        "pipx",
+        "python",
+        "python3",
+        "brew",
+        "apt",
+        "apt-get",
+        "conda",
+        "npm",
+        "cargo",
+        "go",
+        "poetry",
+    }
+)
+
+
+def _is_install_command(text: str) -> bool:
+    """Whether an install_hint is a runnable command rather than prose advice."""
+    try:
+        argv = shlex.split(text.strip())
+    except ValueError:
+        return False
+    return bool(argv) and argv[0].rsplit("/", 1)[-1] in _INSTALL_CMDS
+
+
+def _compact_profile(profile: HostProfile, width: int = 28) -> HostProfile:
+    """Display-only copy: clamp fields that feed `runtimes_table`'s detail cell.
+
+    Truncating reason/path/install_hint keeps every row to at most two physical
+    lines. The original profile is untouched, so probe caching, availability and
+    --fix repair all still see the full values.
+    """
+    runtimes: dict[str, RuntimeStatus] = {
+        name: replace(
+            status,
+            path=short(status.path, width),
+            reason=short(status.reason, width),
+            install_hint=short(status.install_hint, width),
+        )
+        for name, status in profile.runtimes.items()
+    }
+    return replace(profile, runtimes=runtimes)
+
+
+def _render_next_steps(profile: HostProfile, *, cap: int = 5) -> None:
+    """One actionable line per unavailable runtime, capped for scannability."""
+    unavailable = [s for s in profile.runtimes.values() if not s.available]
+    if not unavailable:
+        return
+    section("Next steps")
+    for status in unavailable[:cap]:
+        if _is_install_command(status.install_hint):
+            hint(status.install_hint, f"install {status.name}")
+        else:
+            detail = status.install_hint or status.reason or "unavailable"
+            console.print(f"  • {status.name}: {short(detail, 60)}")
+    extra = len(unavailable) - cap
+    if extra > 0:
+        console.print(f"  • ... and {extra} more")
 
 
 def _fix_python_deps(rt: RuntimeDef, missing: list[str], argv: list[str]) -> bool:

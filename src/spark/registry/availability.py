@@ -31,6 +31,7 @@ from pathlib import Path
 
 from ..config.paths import SparkPaths
 from ..config.schema import ModelEntry, SparkConfig
+from ..formatting import fmt_size
 from ..hf_cache import bytes_in, snapshot_dir
 
 LOCAL = "local"
@@ -38,14 +39,6 @@ HUB = "hub"
 MISSING = "missing"
 EXTERNAL = "external"
 UNVERIFIABLE = "unverifiable"
-
-
-def _fmt_bytes(n: int) -> str:
-    if n >= 2**30:
-        return f"{n / 2**30:.1f} GiB"
-    if n >= 2**20:
-        return f"{n / 2**20:.0f} MiB"
-    return f"{n / 2**10:.0f} KiB"
 
 
 @dataclass(frozen=True)
@@ -67,9 +60,9 @@ class Availability:
     def label(self) -> str:
         """Compact cell for the model table."""
         if self.state == LOCAL:
-            return f"local {_fmt_bytes(self.bytes_present)}"
+            return f"local {fmt_size(self.bytes_present)}"
         if self.state == HUB:
-            return f"hub {_fmt_bytes(self.bytes_present)}"
+            return f"hub {fmt_size(self.bytes_present)}"
         if self.state == MISSING:
             return "MISSING"
         if self.state == EXTERNAL:

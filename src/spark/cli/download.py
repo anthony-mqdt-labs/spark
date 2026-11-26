@@ -32,7 +32,7 @@ from ..errors import InsufficientDiskError, SparkError
 from ..registry import save_model
 from ..registry.store import dir_bytes as _dir_bytes
 from .context import SparkCtx, build_context, refresh_catalog
-from .render import console
+from .render import console, hint, success, warning
 
 from ..inventory import infer_quant_and_params
 
@@ -117,9 +117,9 @@ def _disk_preflight(
     )
 
     if need is None:
-        console.print(
-            f"[yellow]![/yellow] repo size unknown (offline or gated) — "
-            f"floor-only disk check. free {free / GIB:.1f} GiB · floor {floor:g} GiB"
+        warning(
+            f"repo size unknown (offline or gated) — floor-only disk check. "
+            f"free {free / GIB:.1f} GiB · floor {floor:g} GiB"
         )
         blocked = free / GIB <= floor
         detail = f"Only {free / GIB:.1f} GiB free; at/below the {floor:g} GiB floor."
@@ -136,7 +136,7 @@ def _disk_preflight(
         return
     if force:
         ctx.telemetry.warn("download", "disk_gate_forced", repo=repo, need_bytes=need)
-        console.print("[yellow]disk gate bypassed with --force[/yellow]")
+        warning("disk gate bypassed with --force")
         return
     raise InsufficientDiskError(
         detail,
@@ -357,18 +357,18 @@ def download_command(
     save_model(entry, ctx.paths)
     ctx.telemetry.info("download", "registered", model_id=mid, fetched=not no_fetch)
     refresh_catalog(ctx, model_id=mid)
-    console.print(
-        f"[green]✓[/green] registered [cyan]{mid}[/cyan] "
+    success(
+        f"registered [cyan]{mid}[/cyan] "
         f"(format={entry.model_format or 'any'}, quant={entry.quant or '?'})"
     )
 
     # Research: run the agent chain (unless opted out / disabled). Failure here is
     # non-fatal — the model is already registered and runnable.
     if existing is not None and existing.research_status in ("registered", "manual"):
-        console.print(f"[dim]kept existing tuned config[/dim] — re-tune: spark research {mid}")
+        hint(f"spark research {mid}", "kept existing tuned config · re-tune")
         return
     if no_research or not ctx.config.research.enabled:
-        console.print(f"[dim]research skipped[/dim] — run later: spark research {mid}")
+        hint(f"spark research {mid}", "research skipped · run later")
         return
     from .research import perform_research
 
@@ -376,7 +376,6 @@ def download_command(
         perform_research(ctx, entry)
     except SparkError as exc:
         ctx.telemetry.warn("download", "research_failed", model_id=mid, code=exc.code)
-        console.print(
-            f"[yellow]research unavailable[/yellow] ({exc.code}); model still "
-            f"runnable. Retry: spark research {mid}"
+        warning(
+            f"research unavailable ({exc.code}); model still runnable. Retry: spark research {mid}"
         )

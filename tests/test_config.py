@@ -100,3 +100,96 @@ def test_config_validate_accepts_valid_registry(paths, config, monkeypatch):
     save_model(ModelEntry(id="ok", launch_overrides={"--max-tokens": "2048"}), paths)
     result = CliRunner().invoke(config_validate)
     assert result.exit_code == 0, result.output
+
+
+# --- CLI presentation (compact summary, alignment, actionable hints) ----------
+def test_config_show_default_is_compact_and_json_flag_dumps_everything(config, monkeypatch):
+    from click.testing import CliRunner
+
+    from spark.cli.config_cmd import config_show
+
+    monkeypatch.setattr("spark.cli.config_cmd.load_config", lambda: config)
+    runner = CliRunner()
+    summary = runner.invoke(config_show, []).output
+    for token in ("host", "127.0.0.1", "8095", "memory", "disk", "research", "runtimes", "probe"):
+        assert token in summary, token
+    # A runtime-def field must not leak into the default view.
+    assert "ready_timeout_s" not in summary
+
+    for flag in ("--json", "-j"):
+        full = runner.invoke(config_show, [flag]).output
+        assert "ready_timeout_s" in full
+        assert "runtimes" in full
+
+
+def test_config_path_aligns_values_in_one_column_and_hints(paths, monkeypatch):
+    from click.testing import CliRunner
+
+    from spark.cli import config_cmd
+    from spark.config.paths import bundled_config_dir
+
+    monkeypatch.setattr("spark.cli.config_cmd.resolve_paths", lambda: paths)
+    # Long tmp paths must not wrap, or there is no single value column to assert.
+    monkeypatch.setattr(config_cmd.console, "width", 240)
+    out = CliRunner().invoke(config_cmd.config_path).output
+    values = [
+        str(bundled_config_dir()),
+        str(paths.user_config_file),
+        str(paths.data_dir),
+        str(paths.models_dir),
+        str(paths.log_dir),
+        str(paths.host_profile_file),
+    ]
+    lines = [line for line in out.splitlines() if line.strip()]
+    assert len(lines) == len(values) + 1  # rows plus the hint
+    for line, value in zip(lines[: len(values)], values, strict=True):
+        assert line[2:22].strip()  # label occupies the first fixed-width column
+        assert line[22:] == value  # every value starts at the same column
+    assert lines[-1].startswith("→") and "spark config validate" in lines[-1]
+
+
+def test_config_validate_success_is_followed_by_a_hint(paths, config, monkeypatch):
+    from click.testing import CliRunner
+
+    from spark.cli.config_cmd import config_validate
+
+    monkeypatch.setattr("spark.cli.config_cmd.load_config", lambda: config)
+    monkeypatch.setattr("spark.cli.config_cmd.resolve_paths", lambda: paths)
+    out = CliRunner().invoke(config_validate).output
+    assert "✓" in out and "→" in out and "spark config show" in out
+
+
+def test_config_review_keeps_json_and_adds_heading_and_hints(paths, config, monkeypatch):
+    from click.testing import CliRunner
+
+    from spark.cli.config_cmd import config_review
+    from spark.cli.context import SparkCtx
+    from spark.config.schema import ModelEntry
+    from spark.registry import save_model
+    from spark.research import stage
+    from spark.research.types import ResearchOutput
+    from spark.telemetry import Telemetry
+
+    save_model(ModelEntry(id="m", hf_repo="org/m"), paths)
+    stage(
+        paths,
+        "m",
+        ResearchOutput(recommended_backend="mlx_lm"),
+        provider="claude",
+        hf_repo="org/m",
+        host_summary={"chip": "M2"},
+    )
+    ctx = SparkCtx(
+        paths=paths,
+        config=config,
+        secrets=None,
+        telemetry=Telemetry(paths.log_dir, session_id="test"),
+        session_id="test",
+    )
+    monkeypatch.setattr("spark.cli.context.build_context", lambda: ctx)
+    out = CliRunner().invoke(config_review, ["m"]).output
+    assert "Staged research" in out
+    assert "recommended_backend" in out  # full staged JSON is preserved
+    assert "→" in out
+    assert "spark config review m --accept" in out
+    assert "spark config review m --reject" in out

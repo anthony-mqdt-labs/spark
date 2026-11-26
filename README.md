@@ -101,10 +101,18 @@ spark list [--all]             # runnable models (default) / everything (--all)
 spark catalog [--json]         # the machine-readable roster (catalog.json)
 spark forget <model>           # remove a registry entry (weights untouched)
 spark secret set|ls|rm|get <name>                 # macOS Keychain vault
-spark config validate|path|show                   # inspect configuration
+spark config validate|path|show [--json]          # inspect configuration (compact; --json = full)
 spark completion zsh           # emit the zsh completion function
 spark __complete models [context] | describe <model>   # hidden: completion data
 ```
+
+**Visual language.** Every command uses the same glyph vocabulary from
+`cli/render.py`: `✓` done (green), `!` needs attention (yellow), `→` next action
+(cyan), `•` list item (dim). Screens show signal first, with detail behind
+`--all` / `--json`; long fields are ellipsized to terminal width rather than
+wrapped. Byte sizes use KiB/MiB/GiB (`spark.formatting.fmt_size`) in both the CLI
+and completion previews. `-h` is an alias for `--help`, and `spark -h` ends with
+a quick-start block.
 
 **The `spark <model>` fallthrough.** `spark` is a `click.Group` subclass
 (`cli/app.py:SparkGroup`) whose `resolve_command` first tries normal subcommand
@@ -203,7 +211,7 @@ spark/
 │   ├── research/                # types/guard/prompt/providers/chain/staging/validate
 │   ├── telemetry/               # jsonl.py (structured logging; redaction imported)
 │   └── errors.py                # typed errors carrying remediation
-├── tests/                       # pytest (530 tests)
+├── tests/                       # pytest (564 tests)
 ├── spikes/                      # time-boxed evaluation spikes + the portable
 │                                #   human/emotion eval skill (spikes/README.md)
 ├── bake-offs/                   # comparative model bake-offs — quality evals,
@@ -801,7 +809,7 @@ result), `process_crash`, `restart_scheduled`, `process_exit` (wall time, peak R
 
 ## 12. Testing
 
-`uv run pytest` — 530 tests, no live LLM/Keychain required for the suite (the
+`uv run pytest` — 564 tests, no live LLM/Keychain required for the suite (the
 Keychain roundtrip test self-skips off macOS; research uses fake providers and a
 real-subprocess JSON test that needs no model). Coverage spans: config
 merge/precedence, secret redaction + name validation, Keychain roundtrip, probe

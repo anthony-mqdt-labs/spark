@@ -56,9 +56,11 @@ def list_command(show_all: bool):
     from ..registry.store import scan_store
     from .context import refresh_catalog
     from .render import (
+        hint,
         render_inventory_notes,
         render_store_issues,
         runnable_table,
+        warning,
     )
 
     invalid: list[tuple[Path, str]] = []
@@ -71,7 +73,9 @@ def list_command(show_all: bool):
     if inv.runnable_registered or inv.runnable_discovered or inv.external or inv.unverifiable:
         console.print(runnable_table(inv))
     else:
-        console.print("[dim]nothing runnable on disk — try `spark download <hf-repo>`[/dim]")
+        warning("nothing runnable on disk")
+        hint("spark download <repo>", "fetch weights")
+        hint("spark adopt <path>", "register weights already on disk")
     render_inventory_notes(inv, verbose=show_all)
     for path, detail in invalid:
         # One line per skipped file: a hand-edit typo must not silently hide a model.
@@ -244,7 +248,19 @@ def forget_command(model: str):
         console.print("  [dim]no weights were on disk[/dim]")
 
 
-@click.group(cls=SparkGroup, invoke_without_command=True)
+@click.group(
+    cls=SparkGroup,
+    invoke_without_command=True,
+    context_settings={"help_option_names": ["-h", "--help"]},
+    epilog="""\b
+Quick start:
+  spark doctor           check runtimes, budgets and next fixes
+  spark list             what this host can serve right now
+  spark <model>          launch the best runtime (Tab completes models)
+  spark download <repo>  fetch + research a Hugging Face model
+
+Research is staged, never applied. Review it with: spark config review <model>""",
+)
 @click.version_option(package_name="spark", prog_name="spark")
 @click.pass_context
 def cli(ctx: click.Context):

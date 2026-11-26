@@ -211,3 +211,42 @@ def test_built_prompt_has_no_secrets(monkeypatch):
     text = P.build_prompt(req)
     assert "org/Model" in text and "mlx_lm" in text
     assert_no_secrets(text)  # must not raise
+
+
+# --- CLI progress messaging (no network, no real agent subprocess) -------------
+def test_research_progress_names_chain_and_staging(paths, config, monkeypatch, capsys):
+    from spark.cli import research as R
+    from spark.cli.context import SparkCtx
+    from spark.config.schema import ModelEntry
+    from spark.probe.host import HostProfile
+    from spark.research.chain import ChainResult
+    from spark.research.types import ResearchOutput
+    from spark.telemetry import Telemetry
+
+    profile = HostProfile(
+        os="Darwin",
+        arch="arm64",
+        chip="Apple M2",
+        total_memory_bytes=16 * 2**30,
+        cpu_count=8,
+        probed_at=0.0,
+    )
+    monkeypatch.setattr(R, "load_or_probe", lambda *a, **k: profile)
+    monkeypatch.setattr(
+        R,
+        "run_research",
+        lambda hf_repo, prof, cfg, available: ChainResult(
+            ResearchOutput(recommended_backend="mlx_lm"), provider="claude"
+        ),
+    )
+    ctx = SparkCtx(
+        paths=paths,
+        config=config,
+        secrets=None,
+        telemetry=Telemetry(paths.log_dir, session_id="test"),
+        session_id="test",
+    )
+    assert R.perform_research(ctx, ModelEntry(id="m", hf_repo="org/m")) is True
+    out = capsys.readouterr().out
+    assert "→ chain: claude → hermes → pi" in out
+    assert "staged" in out and "not applied" in out

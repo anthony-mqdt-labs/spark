@@ -13,7 +13,7 @@ from ..config.loader import load_config
 from ..config.paths import bundled_config_dir, resolve_paths
 from ..config.schema import LaunchOverrideError, ModelEntry
 from ..errors import ConfigError
-from .render import console
+from .render import console, hint, section, success
 
 
 def _validate_registry_entries(paths) -> None:
@@ -100,29 +100,79 @@ def config_validate():
     """Load + validate the full configuration (raises on error)."""
     cfg = load_config()
     _validate_registry_entries(resolve_paths())
-    console.print(
-        f"[green]✓[/green] configuration valid · "
-        f"{len(cfg.runtimes)} runtime(s): {', '.join(sorted(cfg.runtimes))}"
+    success(
+        f"configuration valid · {len(cfg.runtimes)} runtime(s): {', '.join(sorted(cfg.runtimes))}"
     )
+    hint("spark config show", "inspect resolved settings")
 
 
 @config_group.command(name="path")
 def config_path():
     """Show where spark reads/writes configuration and data."""
     p = resolve_paths()
-    console.print(f"[bold]bundled defaults[/bold]: {bundled_config_dir()}")
-    console.print(f"[bold]user config[/bold]:      {p.user_config_file}")
-    console.print(f"[bold]data dir[/bold]:         {p.data_dir}")
-    console.print(f"[bold]models[/bold]:           {p.models_dir}")
-    console.print(f"[bold]logs[/bold]:             {p.log_dir}")
-    console.print(f"[bold]host profile[/bold]:     {p.host_profile_file}")
+    rows = (
+        ("bundled defaults", bundled_config_dir()),
+        ("user config", p.user_config_file),
+        ("data dir", p.data_dir),
+        ("models", p.models_dir),
+        ("logs", p.log_dir),
+        ("host profile", p.host_profile_file),
+    )
+    for label, value in rows:
+        console.print(f"  [bold]{label:<20}[/bold]{value}")
+    hint("spark config validate", "check these paths")
+
+
+def _print_config_summary(cfg) -> None:
+    """Compact two-column view of the knobs an operator actually tunes.
+
+    The full resolved dump (including every runtime's launch template) is a
+    wall of text; ``--json`` is the deliberate escape hatch for that.
+    """
+    section("Configuration")
+    g = cfg.general
+    lo, hi = g.port_range
+    providers = [p.name for p in cfg.research.providers if p.enabled]
+    rows = (
+        ("host", g.host),
+        ("ports", f"{lo}–{hi}"),
+        (
+            "memory",
+            f"{cfg.memory.usable_fraction:.0%} of unified · "
+            f"{'enforced' if cfg.memory.enforce else 'advisory'}",
+        ),
+        (
+            "disk",
+            f"{cfg.disk.min_free_gib:g} GiB min free · "
+            f"{'enforced' if cfg.disk.enforce else 'advisory'}",
+        ),
+        ("preference", " → ".join(g.preference) or "—"),
+        (
+            "research",
+            f"{'enabled' if cfg.research.enabled else 'disabled'} · "
+            f"{' → '.join(providers) or 'none'}",
+        ),
+        ("runtimes", f"{len(cfg.runtimes)} configured"),
+        (
+            "probe",
+            f"{cfg.probe.max_age_s / 3600:g}h host cache · "
+            f"{cfg.research.flag_probe_timeout_s:g}s flag probe",
+        ),
+    )
+    for label, value in rows:
+        console.print(f"  [bold]{label:<20}[/bold]{value}")
+    hint("spark config show --json", "full resolved config")
 
 
 @config_group.command(name="show")
-def config_show():
-    """Print the resolved configuration (no secrets — there are none here)."""
+@click.option("--json", "-j", "as_json", is_flag=True, help="Print the full resolved config.")
+def config_show(as_json: bool):
+    """Print a compact config summary (no secrets); --json dumps everything."""
     cfg = load_config()
-    console.print_json(cfg.model_dump_json(indent=2))
+    if as_json:
+        console.print_json(cfg.model_dump_json(indent=2))
+        return
+    _print_config_summary(cfg)
 
 
 @config_group.command(name="review")
@@ -148,10 +198,8 @@ def config_review(model: str, accept: bool, reject: bool):
         )
         return
 
-    console.print(
-        f"[bold]Staged research[/bold] for [cyan]{entry.id}[/cyan] "
-        f"(provider: {staged.get('provider')})"
-    )
+    section("Staged research")
+    console.print(f"for [cyan]{entry.id}[/cyan] (provider: {staged.get('provider')})")
     console.print_json(json.dumps(staged.get("output", {}), indent=2))
 
     if reject:
@@ -174,7 +222,8 @@ def config_review(model: str, accept: bool, reject: bool):
             ) from exc
         _accept_output(entry=entry, output=output, ctx=ctx, staged=True)
         return
-    console.print("\n[dim]--accept to apply, --reject to discard[/dim]")
+    hint(f"spark config review {entry.id} --accept", "apply")
+    hint(f"spark config review {entry.id} --reject", "discard")
 
 
 @config_group.command(name="import")

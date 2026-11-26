@@ -12,7 +12,7 @@ from ..registry import resolve_model
 from ..research import run_research, stage
 from ..research.prompt import host_summary
 from .context import build_context
-from .render import console
+from .render import console, hint, success, working
 
 
 def perform_research(ctx, entry) -> bool:
@@ -26,11 +26,12 @@ def perform_research(ctx, entry) -> bool:
         max_age_s=ctx.config.probe.max_age_s,
     )
     available = profile.available_runtimes
-    console.print(
-        f"[bold]spark[/bold] researching [cyan]{entry.id}[/cyan] "
-        f"({entry.hf_repo}) across {len(available)} runtime(s) …"
-    )
-    result = run_research(entry.hf_repo, profile, ctx.config, available)
+    # Say what happens during the (potentially minutes-long) agent call, and
+    # that its answer is only staged — nothing is applied without review.
+    chain = " → ".join(p.name for p in ctx.config.research.providers if p.enabled) or "none"
+    hint(f"{chain} · staged for review (not applied)", "chain")
+    with working(f"researching [cyan]{entry.id}[/cyan] across {len(available)} runtime(s) …"):
+        result = run_research(entry.hf_repo, profile, ctx.config, available)
     path = stage(
         ctx.paths,
         entry.id,
@@ -46,11 +47,11 @@ def perform_research(ctx, entry) -> bool:
         provider=result.provider,
         recommended=result.output.recommended_backend,
     )
-    console.print(
-        f"[green]✓[/green] {result.provider} recommends "
-        f"[magenta]{result.output.recommended_backend}[/magenta] · staged → {path.name}"
+    success(
+        f"{result.provider} recommends [magenta]{result.output.recommended_backend}[/magenta] "
+        f"· staged → {path.name}"
     )
-    console.print(f"  review & accept: [bold]spark config review {entry.id}[/bold]")
+    hint(f"spark config review {entry.id}", "review & accept")
     return True
 
 
