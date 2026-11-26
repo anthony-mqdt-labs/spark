@@ -4,11 +4,13 @@ Handoff for an agent resuming **unfinished** work. Completed history is not kept
 here: `git log`, `README.md`, and `../bugs/` are the record. Anything that is done
 gets deleted from this file rather than annotated. Overwrite at session end.
 
-**State, 2026-11-23.** Hardening pass is **uncommitted** in the working tree
-(supervisor lifecycle, schema seams, proxy streaming, research tool-off, catalog
-ownership, hermes tool-off, keychain attribute-only lookup — README D14–D18; tests in `tests/test_hardening.py`). 283 tests pass;
-the two old F401s are gone. Review the diff and commit on the operator's word.
-`specs/0003-sdcpp-image-runtime/` and the `CLAUDE.md` edit predate the pass.
+**State, 2026-11-25.** The 2026-11-23 hardening pass is committed on `main`
+(`49d1f26`). A second, test-first review-hardening pass lives on the
+`review/hardening-regressions` branch: shared redaction registry, scrubbed
+per-server logs, real memory gate for disk-first launches, hub-ref path
+validation, instance/catalog write hardening, reserved research overrides, and
+unified fuzzy resolution. 368 tests pass on that branch. Review its diff and
+merge on the operator's word. The `Do next` items below still stand.
 
 ## Do next — concrete, unblocked
 

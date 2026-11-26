@@ -27,7 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..budget import check_disk, check_memory
-from ..catalog import InstancePublisher, read_instances, write_catalog
+from ..catalog import InstancePublisher, read_instances, safe_write_catalog
+from ..inventory import infer_quant_and_params
 from ..config.paths import SparkPaths
 from ..config.schema import ModelEntry, SparkConfig, id_file_stem
 from ..errors import (
@@ -41,6 +42,7 @@ from ..errors import (
     WeightsMissingError,
 )
 from ..probe.host import HostProfile
+from ..redaction import scrub_string
 from ..registry.availability import MISSING, resolve_availability
 from ..runtimes.base import Backend
 from ..secrets.store import SecretStore
@@ -107,6 +109,66 @@ def _rss_bytes(pid: int) -> int:
         return 0
 
 
+class _ScrubbingLogPump:
+    """Drain a child's stdout/stderr through a pipe, scrubbing before disk.
+
+    A child writes to a file *descriptor*, so wrapping the Python file object in
+    a redactor would not intercept a single byte. The parent keeps the read end
+    of a pipe and a daemon thread scrubs complete lines before appending them to
+    the log file. One pump instance can serve several spawns (restarts).
+    """
+
+    def __init__(self, fh) -> None:
+        self._fh = fh
+        self._lock = threading.Lock()
+        self._threads: list[threading.Thread] = []
+
+    def start(self) -> int:
+        """Return the write fd to hand to ``Popen`` (parent closes it thereafter)."""
+        read_fd, write_fd = os.pipe()
+        thread = threading.Thread(
+            target=self._drain, args=(read_fd,), daemon=True,
+            name="spark-server-log",
+        )
+        thread.start()
+        self._threads.append(thread)
+        return write_fd
+
+    def join(self, timeout: float = 1.0) -> None:
+        for thread in self._threads:
+            thread.join(timeout)
+
+    def _drain(self, read_fd: int) -> None:
+        pending = b""
+        try:
+            while True:
+                chunk = os.read(read_fd, 65536)
+                if not chunk:
+                    break
+                pending += chunk
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    self._write(line + b"\n")
+            if pending:
+                self._write(pending)
+        except OSError:
+            pass  # child/parent closed the pipe mid-read; nothing left to log
+        finally:
+            try:
+                os.close(read_fd)
+            except OSError:
+                pass
+
+    def _write(self, raw: bytes) -> None:
+        text = scrub_string(raw.decode("utf-8", errors="replace"))
+        with self._lock:
+            try:
+                self._fh.write(text)
+                self._fh.flush()
+            except (OSError, ValueError):
+                pass  # logging must never kill the supervised child
+
+
 class Supervisor:
     def __init__(
         self,
@@ -136,6 +198,9 @@ class Supervisor:
         # CLI output clean; tailed on failure so the reason still surfaces.
         self._log_path = paths.log_dir / "servers" / f"{id_file_stem(entry.id)}.log"
         self._log_fh = None
+        self._log_pump: _ScrubbingLogPump | None = None
+        self._signal_note_logged = False
+        self._monitor_ticks = 0
 
     @property
     def log_path(self) -> Path:
@@ -144,9 +209,12 @@ class Supervisor:
     def log_tail(self, n: int = 30) -> str:
         """Last ``n`` lines of the child server log (empty if none)."""
         try:
-            return "\n".join(self._log_path.read_text(errors="replace").splitlines()[-n:])
+            text = "\n".join(self._log_path.read_text(errors="replace").splitlines()[-n:])
         except OSError:
             return ""
+        # Defense in depth: a log written by an older spark must also be safe to
+        # render to the operator's terminal.
+        return scrub_string(text)
 
     # -- preflight -------------------------------------------------------------
     def _preflight(self) -> int:
@@ -218,8 +286,29 @@ class Supervisor:
                 context={"model": self.entry.id, "pid": live[0].get("pid")},
             )
 
-        # Memory budget.
-        mem = check_memory(self.entry, self.profile, self.config.memory)
+        # Memory budget. Disk-first launches synthesize their entry from a
+        # filename (quant/params) and the availability check (size), so hydrate
+        # those fields here rather than letting check_memory see "unknown" and
+        # silently return ok=True for a 70B model.
+        budget_entry = self.entry
+        inferred_quant, inferred_params = infer_quant_and_params(
+            self.entry.hf_repo or self.entry.path or self.entry.id
+        )
+        updates: dict[str, object] = {}
+        if not self.entry.quant and inferred_quant:
+            updates["quant"] = inferred_quant
+        if self.entry.params_billions is None and inferred_params is not None:
+            updates["params_billions"] = inferred_params
+        if not self.entry.size_bytes and avail.bytes_present > 1:
+            updates["size_bytes"] = avail.bytes_present
+        if updates:
+            budget_entry = self.entry.model_copy(update=updates)
+            self.log.info(
+                "supervisor", "budget_metadata_hydrated",
+                model=self.entry.id, fields=sorted(updates),
+            )
+
+        mem = check_memory(budget_entry, self.profile, self.config.memory)
         self.log.info("supervisor", "memory_check", ok=mem.ok, detail=mem.detail)
         if not mem.ok and self.config.memory.enforce and not self.force:
             raise InsufficientMemoryError(
@@ -239,7 +328,7 @@ class Supervisor:
         # reading is advisory — being low on disk should not block a run.
         # Measured on the volume the bytes would land on: the store when a fetch
         # is possible, the data dir otherwise.
-        need_bytes = (self.entry.size_bytes or 0) if avail.state == MISSING else 0
+        need_bytes = (budget_entry.size_bytes or 0) if avail.state == MISSING else 0
         disk_target = (
             self.paths.model_store_dir if avail.state == MISSING else self.paths.data_dir
         )
@@ -338,7 +427,7 @@ class Supervisor:
                 )
             if self._is_healthy(url):
                 return
-            time.sleep(1.0)
+            time.sleep(self.config.supervisor.health_interval_s)
         raise HealthCheckError(
             f"Server did not become healthy within {timeout_s:.0f}s.",
             remediation=[
@@ -387,14 +476,19 @@ class Supervisor:
     def _monitor(self, url: str) -> str:
         """Block until the process exits or a stop is requested. Returns reason."""
         interval = self.config.supervisor.health_interval_s
+        self._note_stop_signal()
         while not self._stop.is_set():
             assert self._proc is not None
             code = self._proc.poll()
             if code is not None:
                 return "exited"
-            rss = _rss_bytes(self._proc.pid)
-            if rss:
-                self._peak_rss = max(self._peak_rss, rss)
+            # Peak RSS is a log field, not a gate: sampling `ps` on every
+            # health tick cost ~12 fork+exec/minute for the server's lifetime.
+            self._monitor_ticks += 1
+            if self._monitor_ticks % 6 == 0:
+                rss = _rss_bytes(self._proc.pid)
+                if rss:
+                    self._peak_rss = max(self._peak_rss, rss)
             # Keep the published instance record fresh: a consumer uses
             # updated_at to tell a live endpoint from a stale file left by a
             # hard kill (SIGKILL, power loss), which is the one case where
@@ -407,6 +501,24 @@ class Supervisor:
             self._stop.wait(interval)
         return "stop_requested"
 
+    def _schedule_restart(
+        self, attempt: int, backoff: float, policy, *, reason: str
+    ) -> tuple[int, float] | None:
+        """One bounded restart step. Returns the next (attempt, backoff), or
+        ``None`` when the incident budget is exhausted or a stop was requested.
+
+        Startup failures and mid-run crashes must share this logic — two copies
+        meant a fix to backoff/remediation applied to only one of them.
+        """
+        if attempt >= policy.max_restarts or self._stop.is_set():
+            return None
+        self.log.warn(
+            "supervisor", "restart_scheduled",
+            attempt=attempt + 1, backoff_s=backoff, reason=reason,
+        )
+        self._stop.wait(backoff)
+        return attempt + 1, min(backoff * 2, policy.backoff_max_s)
+
     # -- lifecycle -------------------------------------------------------------
     def _spawn(self, cmd: list[str], env: dict[str, str]) -> None:
         self.log.info(
@@ -416,15 +528,17 @@ class Supervisor:
         )
         if self._log_fh is None:
             self._log_fh = self._open_server_log()
+        assert self._log_pump is not None
+        # Child stdout+stderr go through a scrubbing pipe, not straight to a file
+        # descriptor: a runtime that echoes its HF_TOKEN must not put it on disk.
+        self._log_fh.write(scrub_string(
+            f"\n=== spawn {time.strftime('%Y-%m-%dT%H:%M:%S')} :: {' '.join(cmd)} ===\n"
+        ))
+        self._log_fh.flush()
+        write_fd = self._log_pump.start()
         try:
-            # Child stdout+stderr go to the per-run log file, not the terminal, so
-            # the CLI stays clean (Vite-style). The log is tailed on failure.
-            self._log_fh.write(
-                f"\n=== spawn {time.strftime('%Y-%m-%dT%H:%M:%S')} :: {' '.join(cmd)} ===\n"
-            )
-            self._log_fh.flush()
             self._proc = subprocess.Popen(
-                cmd, env=env, stdout=self._log_fh, stderr=subprocess.STDOUT
+                cmd, env=env, stdout=write_fd, stderr=write_fd
             )
         except FileNotFoundError as exc:
             raise LaunchError(
@@ -436,6 +550,13 @@ class Supervisor:
                 context={"binary": cmd[0]},
                 cause=exc,
             ) from exc
+        finally:
+            # The child owns a dup of this fd; the parent's copy must close or
+            # the pump never sees EOF and the log stays open indefinitely.
+            try:
+                os.close(write_fd)
+            except OSError:
+                pass
 
     #: Roll the server log once it passes this size (one previous copy kept).
     LOG_ROLL_BYTES = 64 * 2**20
@@ -453,7 +574,15 @@ class Supervisor:
                 self._log_path.replace(self._log_path.with_suffix(".log.1"))
         except OSError:
             pass  # absent (first run) or unrollable: append regardless
-        return open(self._log_path, "a", buffering=1)
+        fd = os.open(self._log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.fchmod(fd, 0o600)  # tighten a log created by an older spark
+            fh = os.fdopen(fd, "a", buffering=1)
+        except BaseException:
+            os.close(fd)
+            raise
+        self._log_pump = _ScrubbingLogPump(fh)
+        return fh
 
     def _terminate(self) -> None:
         if not self._proc or self._proc.poll() is not None:
@@ -471,9 +600,22 @@ class Supervisor:
             except subprocess.TimeoutExpired:
                 pass
 
+    def _note_stop_signal(self) -> None:
+        """Log the stop once, off the signal handler's stack.
+
+        Python runs signal handlers on the main thread. Logging inside one can
+        re-enter the telemetry lock while the main thread already holds it in
+        ``_write`` — a self-deadlock. The event is still required by the logging
+        contract, so the monitor loop emits it after observing the stop event.
+        """
+        if self._stop.is_set() and not self._signal_note_logged:
+            self._signal_note_logged = True
+            self.log.info("supervisor", "signal_received", signal="stop")
+
     def _install_signals(self) -> None:
         def handler(signum, _frame):
-            self.log.info("supervisor", "signal_received", signal=signum)
+            # Do the absolute minimum here: set an Event (async-signal-safe
+            # enough for this CLI). No logging, no file IO, no locks.
             self._stop.set()
 
         for sig in (signal.SIGINT, signal.SIGTERM):
@@ -489,7 +631,8 @@ class Supervisor:
 
     def _monitor_attached(self, url: str) -> str:
         """Watch an attached (not-owned) endpoint until stop requested."""
-        while not self._stop.wait(1.0):  # timed: stays responsive to signals
+        self._note_stop_signal()
+        while not self._stop.wait(self.config.supervisor.health_interval_s):
             pass
         return "stop_requested"
 
@@ -508,10 +651,13 @@ class Supervisor:
             if self._publisher is not None:
                 self._publisher.remove()
                 self._publisher = None
-            try:
-                write_catalog(self.paths, self.config)
-            except Exception as exc:  # noqa: BLE001 - publishing is a courtesy
-                self.log.warn("supervisor", "catalog_write_failed", error=repr(exc))
+            safe_write_catalog(
+                self.paths, self.config,
+                component="supervisor", event="catalog_write_failed",
+            )
+            if self._log_pump is not None:
+                self._log_pump.join()
+                self._log_pump = None
             if self._log_fh:
                 self._log_fh.close()
                 self._log_fh = None
@@ -563,10 +709,10 @@ class Supervisor:
         )
         # The roster promises "refreshed on server ready"; without this a
         # consumer reading catalog.json sees no live instance until exit.
-        try:
-            write_catalog(self.paths, self.config)
-        except Exception as exc:  # noqa: BLE001 - publishing is a courtesy
-            self.log.warn("supervisor", "catalog_write_failed", error=repr(exc))
+        safe_write_catalog(
+            self.paths, self.config,
+            component="supervisor", event="catalog_write_failed",
+        )
 
     def _run(self, on_ready: Callable[[ReadyInfo], None] | None) -> LaunchResult:
         t0 = time.monotonic()
@@ -586,6 +732,9 @@ class Supervisor:
                 backend=self.backend.name, model=self.entry.id,
             )
             self._announce_ready(on_ready, base, port, t0)
+            # An attached daemon is still a live server: consumers read the
+            # instance directory, so it must be published like a spawned one.
+            self._publish_instance(base, port, url)
             self._monitor_attached(url)
             self.log.info("supervisor", "detached", port=port, model=self.entry.id)
             return LaunchResult(base, self.backend.name, port, 0)
@@ -627,14 +776,11 @@ class Supervisor:
                 self._verify_generation(host, port)
             except (LaunchError, HealthCheckError) as exc:
                 self._terminate()
-                if attempt < max_restarts and not self._stop.is_set():
-                    self.log.warn(
-                        "supervisor", "restart_scheduled",
-                        attempt=attempt + 1, backoff_s=backoff, reason=exc.code,
-                    )
-                    self._stop.wait(backoff)
-                    backoff = min(backoff * 2, policy.backoff_max_s)
-                    attempt += 1
+                scheduled = self._schedule_restart(
+                    attempt, backoff, policy, reason=exc.code
+                )
+                if scheduled is not None:
+                    attempt, backoff = scheduled
                     continue
                 raise RecoveryExhaustedError(
                     f"'{self.entry.id}' failed to start after {attempt + 1} attempt(s).",
@@ -675,14 +821,11 @@ class Supervisor:
                 # day exhausts the budget for good by day four.
                 self.log.info("supervisor", "restart_budget_reset", uptime_s=round(uptime, 1))
                 attempt, backoff = 0, policy.backoff_base_s
-            if attempt < max_restarts and not self._stop.is_set():
-                self.log.warn(
-                    "supervisor", "restart_scheduled",
-                    attempt=attempt + 1, backoff_s=backoff, reason="crash",
-                )
-                self._stop.wait(backoff)
-                backoff = min(backoff * 2, policy.backoff_max_s)
-                attempt += 1
+            scheduled = self._schedule_restart(
+                attempt, backoff, policy, reason="crash"
+            )
+            if scheduled is not None:
+                attempt, backoff = scheduled
                 continue
             self._emit_exit(started_at, port, restarts, graceful=False)
             raise RecoveryExhaustedError(

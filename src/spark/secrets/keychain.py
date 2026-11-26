@@ -17,6 +17,7 @@ import os
 import platform
 from ctypes import POINTER, byref, c_char_p, c_uint32, c_void_p
 from pathlib import Path
+from typing import NoReturn
 
 from ..errors import SecretBackendError, SecretError, SecretNotFoundError
 from .store import SecretStore, validate_name
@@ -85,7 +86,7 @@ class KeychainStore(SecretStore):
         return self._lib
 
     # -- status mapping --------------------------------------------------------
-    def _raise_status(self, status: int, name: str, op: str) -> None:
+    def _raise_status(self, status: int, name: str, op: str) -> NoReturn:
         if status == _ERR_SEC_AUTH_FAILED:
             raise SecretError(
                 f"Keychain access denied for '{name}'.",
@@ -109,6 +110,17 @@ class KeychainStore(SecretStore):
         )
 
     # -- core ops --------------------------------------------------------------
+    def _add_raw(self, acct: bytes, data: bytes) -> int:
+        """Single raw `SecKeychainAddGenericPassword` call; value stays in memory."""
+        lib = self._require()
+        return int(lib.SecKeychainAddGenericPassword(
+            None,
+            len(self._service), self._service,
+            len(acct), acct,
+            len(data), data,
+            byref(c_void_p()),
+        ))
+
     def set(self, name: str, value: str) -> None:
         validate_name(name)
         if value == "":
@@ -116,29 +128,15 @@ class KeychainStore(SecretStore):
                 "Refusing to store an empty secret value.",
                 remediation=["Provide a non-empty value via getpass/stdin."],
             )
-        lib = self._require()
         self._register_for_redaction(value)  # masked from this moment, not first read
         acct = name.encode("utf-8")
         data = value.encode("utf-8")
 
-        item_ref = c_void_p()
-        status = lib.SecKeychainAddGenericPassword(
-            None,
-            len(self._service), self._service,
-            len(acct), acct,
-            len(data), data,
-            byref(item_ref),
-        )
+        status = self._add_raw(acct, data)
         if status == _ERR_SEC_DUPLICATE_ITEM:
             # Overwrite = delete then add (simpler + reliable vs. modify-in-place).
             self._delete_raw(name)
-            status = lib.SecKeychainAddGenericPassword(
-                None,
-                len(self._service), self._service,
-                len(acct), acct,
-                len(data), data,
-                byref(item_ref),
-            )
+            status = self._add_raw(acct, data)
         if status != _ERR_SEC_SUCCESS:
             self._raise_status(status, name, "set")
         self._index_add(name)
@@ -217,7 +215,6 @@ class KeychainStore(SecretStore):
         if status == _ERR_SEC_ITEM_NOT_FOUND:
             return False
         self._raise_status(status, name, "exists")
-        return False  # unreachable
 
     def list_names(self) -> list[str]:
         """Return registered secret names (non-secret) from the index, keeping only

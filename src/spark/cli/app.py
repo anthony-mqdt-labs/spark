@@ -110,6 +110,89 @@ def catalog_command(as_json: bool, refresh: bool):
             console.print(f"    • [cyan]{d['id']}[/cyan] [dim]({d['source']})[/dim]")
 
 
+def _adopt_registry_exact(target: str, registered):
+    """The registry row this query already names (id, alias, repo or path)."""
+    tl = target.lower()
+    for entry, avail in registered:
+        if entry.id.lower() == tl:
+            return entry, avail
+        if any(alias.lower() == tl for alias in entry.aliases):
+            return entry, avail
+        if (entry.hf_repo or "").lower() == tl:
+            return entry, avail
+        loc = getattr(avail, "location", "") or ""
+        if loc and (loc == target or loc.lower() == tl):
+            return entry, avail
+        if entry.path and (entry.path == target or entry.path.lower() == tl):
+            return entry, avail
+    return None
+
+
+def _adopt_non_servable_hits(target: str, inv):
+    tl = target.lower()
+    exact = [m for m in inv.non_servable if m.display_id.lower() == tl]
+    if exact:
+        return exact
+    tails = [
+        m for m in inv.non_servable
+        if m.display_id.lower().split("/")[-1] == tl
+    ]
+    if tails:
+        return tails
+    prefix = [m for m in inv.non_servable if m.display_id.lower().startswith(tl)]
+    return prefix or [m for m in inv.non_servable if tl in m.display_id.lower()]
+
+
+def _adopt_registered_error(repo: str, entry, avail):
+    """The exact query is already registered — explain its state precisely."""
+    from ..errors import AlreadyRegisteredError
+
+    backend = entry.backend or "auto"
+    research = entry.research_status
+    state = getattr(avail, "state", "?")
+    detail = getattr(avail, "detail", "")
+    location = getattr(avail, "location", "") or ""
+    if state == "missing":
+        weights = f"weights missing ({detail})" if detail else "weights missing"
+    elif state in ("local", "hub"):
+        weights = f"weights present ({state}{f': {location}' if location else ''})"
+    elif state == "external":
+        weights = f"weights owned by '{entry.backend}' runtime"
+    elif state == "unverifiable":
+        weights = "entry declares neither path nor hf_repo"
+    else:
+        weights = f"weights state: {state}"
+    message = (
+        f"'{repo}' is already registered as '{entry.id}' — nothing to adopt.\n"
+        f"backend: {backend} · research: {research} · {weights}"
+    )
+    if state == "missing":
+        remediation = (
+            [f"Fetch weights: spark download {entry.hf_repo}"] if entry.hf_repo else []
+        )
+        remediation += [f"Drop the entry: spark forget {entry.id}"]
+    elif research == "pending":
+        # `pending` is research state, not download state — the original confusion.
+        remediation = [
+            f"Weights are on disk — no adopt needed. Research next: spark research {entry.id}",
+            f"Or just run it: spark run {entry.id}",
+        ]
+    else:
+        remediation = [f"Run it: spark run {entry.id}"]
+    return AlreadyRegisteredError(
+        message,
+        remediation=remediation,
+        context={
+            "query": repo,
+            "model_id": entry.id,
+            "backend": entry.backend,
+            "research_status": research,
+            "availability": state,
+            "location": location,
+        },
+    )
+
+
 def _adopt_miss_error(repo: str, inv, ctx) -> SparkError:
     """State-aware error for `spark adopt <query>` when nothing was adopted.
 
@@ -122,11 +205,8 @@ def _adopt_miss_error(repo: str, inv, ctx) -> SparkError:
     """
     from pathlib import Path
 
-    from ..errors import (
-        AlreadyRegisteredError,
-        AmbiguousModelError,
-        ModelNotFoundError,
-    )
+    from ..errors import AmbiguousModelError, ModelNotFoundError
+    from ..registry.models import fuzzy_match
 
     target = repo.strip()
     tl = target.lower()
@@ -142,76 +222,12 @@ def _adopt_miss_error(repo: str, inv, ctx) -> SparkError:
         for e, a in group
     ]
 
-    def _registry_exact():
-        for e, a in registered:
-            if e.id.lower() == tl:
-                return e, a
-            if any(al.lower() == tl for al in e.aliases):
-                return e, a
-            if (e.hf_repo or "").lower() == tl:
-                return e, a
-            loc = getattr(a, "location", "") or ""
-            if loc and (loc == target or loc.lower() == tl):
-                return e, a
-            if e.path and (e.path == target or e.path.lower() == tl):
-                return e, a
-        return None
-
-    hit = _registry_exact()
+    hit = _adopt_registry_exact(target, registered)
     if hit is not None:
-        entry, avail = hit
-        backend = entry.backend or "auto"
-        research = entry.research_status
-        state = getattr(avail, "state", "?")
-        detail = getattr(avail, "detail", "")
-        location = getattr(avail, "location", "") or ""
-        if state == "missing":
-            weights = f"weights missing ({detail})" if detail else "weights missing"
-        elif state in ("local", "hub"):
-            weights = f"weights present ({state}{f': {location}' if location else ''})"
-        elif state == "external":
-            weights = f"weights owned by '{entry.backend}' runtime"
-        elif state == "unverifiable":
-            weights = "entry declares neither path nor hf_repo"
-        else:
-            weights = f"weights state: {state}"
-        message = (
-            f"'{repo}' is already registered as '{entry.id}' — nothing to adopt.\n"
-            f"backend: {backend} · research: {research} · {weights}"
-        )
-        if state == "missing":
-            remediation = (
-                [f"Fetch weights: spark download {entry.hf_repo}"]
-                if entry.hf_repo
-                else []
-            )
-            remediation += [f"Drop the entry: spark forget {entry.id}"]
-        elif research == "pending":
-            # The exact confusion that prompted this: `pending` in `spark list`
-            # is research state, not download state. Weights are already here.
-            remediation = [
-                f"Weights are on disk — no adopt needed. Research next: spark research {entry.id}",
-                f"Or just run it: spark run {entry.id}",
-            ]
-        else:
-            remediation = [f"Run it: spark run {entry.id}"]
-        return AlreadyRegisteredError(
-            message,
-            remediation=remediation,
-            context={
-                "query": repo,
-                "model_id": entry.id,
-                "backend": entry.backend,
-                "research_status": research,
-                "availability": state,
-                "location": location,
-            },
-        )
+        return _adopt_registered_error(repo, *hit)
 
-    # Ambiguous registry prefix/substring (adopt takes one model).
-    prefix = [e for e, _ in registered if e.id.lower().startswith(tl)]
-    substr = [e for e, _ in registered if tl in e.id.lower()]
-    candidates = prefix or substr
+    # Ambiguous registry query (adopt takes one model).
+    _hit, candidates = fuzzy_match(repo, [(e.id, e) for e, _ in registered])
     if len(candidates) > 1:
         ids = sorted({e.id for e in candidates})
         return AmbiguousModelError(
@@ -222,23 +238,7 @@ def _adopt_miss_error(repo: str, inv, ctx) -> SparkError:
 
     # Cached repos spark cannot serve (embedders, speech). Never adoptable,
     # but the query *is* on disk — say so instead of "nothing matches".
-    def _non_servable_hits():
-        exact = [m for m in inv.non_servable if m.display_id.lower() == tl]
-        if exact:
-            return exact
-        tails = [
-            m
-            for m in inv.non_servable
-            if m.display_id.lower().split("/")[-1] == tl
-        ]
-        if tails:
-            return tails
-        pre = [m for m in inv.non_servable if m.display_id.lower().startswith(tl)]
-        if pre:
-            return pre
-        return [m for m in inv.non_servable if tl in m.display_id.lower()]
-
-    ns_hits = _non_servable_hits()
+    ns_hits = _adopt_non_servable_hits(target, inv)
     if ns_hits:
         m = ns_hits[0]
         others = f" (+{len(ns_hits) - 1} more)" if len(ns_hits) > 1 else ""
@@ -366,8 +366,9 @@ def adopt_command(repo: str, model_id: str | None, backend: str):
 
     from ..config.schema import ModelEntry
     from ..errors import AlreadyRegisteredError, ConfigError
-    from ..inventory import build_inventory
+    from ..inventory import build_inventory, infer_quant_and_params
     from ..registry import list_models, save_model
+    from ..registry.models import fuzzy_match
     from .context import refresh_catalog
 
     ctx = build_context()
@@ -377,34 +378,18 @@ def adopt_command(repo: str, model_id: str | None, backend: str):
             code="CFG_NOT_FOUND",
             remediation=[f"Known runtimes: {', '.join(sorted(ctx.config.runtimes))}"],
         )
-    inv = build_inventory(ctx.paths, ctx.config, with_bytes=False)
+    # adopt is a one-off write: pay for the byte walk once so the registry entry
+    # it persists carries a real size for the memory/disk gates.
+    inv = build_inventory(ctx.paths, ctx.config, with_bytes=True)
     target = repo.strip()
     tl = target.lower()
-    found = None
-    for m in inv.runnable_discovered:
-        if m.display_id.lower() == tl or m.location == target:
-            found = m
-            break
+    # Exact on-disk location first, then the shared fuzzy rule (exact id, unique
+    # prefix/substring, unique repo tail) — identical to `run` and `registry`.
+    found = next((m for m in inv.runnable_discovered if m.location == target), None)
     if found is None:
-        # Forgiving match: unique tail slug (`bonsai-8b` for
-        # `prism-ml/Ternary-Bonsai-8B-mlx-2bit`), then unique prefix/substring.
-        tails = [
-            m
-            for m in inv.runnable_discovered
-            if m.display_id.lower().split("/")[-1] == tl
-        ]
-        if len(tails) == 1:
-            found = tails[0]
-        else:
-            prefix = [
-                m for m in inv.runnable_discovered if m.display_id.lower().startswith(tl)
-            ]
-            substr = [
-                m for m in inv.runnable_discovered if tl in m.display_id.lower()
-            ]
-            unique = prefix if len(prefix) == 1 else (substr if len(substr) == 1 else [])
-            if unique:
-                found = unique[0]
+        found, _ambiguous = fuzzy_match(
+            repo, [(m.display_id, m) for m in inv.runnable_discovered], tails=True
+        )
     if found is None:
         raise _adopt_miss_error(repo, inv, ctx)
     slug = model_id or re.sub(r"[^A-Za-z0-9_.-]+", "-", found.display_id.split("/")[-1]).strip("-").lower()
@@ -415,13 +400,16 @@ def adopt_command(repo: str, model_id: str | None, backend: str):
             remediation=[f"Pick another id: spark adopt {repo} --id <new-id>"],
             context={"model": slug},
         )
+    quant, params = infer_quant_and_params(found.display_id)
     entry = ModelEntry(
         id=slug,
         hf_repo=found.repo,
         path=found.location if found.source == "store" else "",
         backend=backend,
-        model_format=found.model_format,  # type: ignore[arg-type]
-        quant=found.quant,
+        model_format=found.model_format,
+        quant=found.quant or quant,
+        params_billions=params,
+        size_bytes=found.bytes_present or None,
         research_status="pending",
     )
     save_model(entry, ctx.paths)
@@ -528,6 +516,10 @@ def _render_unexpected(exc: Exception) -> None:
     import os
     import traceback
 
+    from ..redaction import scrub_string
+
+    raw_message = str(exc)
+    message = scrub_string(raw_message[:512])
     tb = traceback.extract_tb(exc.__traceback__)
     where = tb[-1] if tb else None
     try:
@@ -535,16 +527,17 @@ def _render_unexpected(exc: Exception) -> None:
 
         get_telemetry().critical(
             "cli", "unexpected_error",
-            error_type=type(exc).__name__, message=str(exc)[:512],
+            error_type=type(exc).__name__, message=message,
             file=where.filename if where else "", line=where.lineno if where else 0,
             context_window=get_telemetry().context_window()[-10:],
         )
     except Exception:  # noqa: BLE001
         pass
     if os.environ.get("SPARK_DEBUG"):
-        traceback.print_exception(exc)
+        # A traceback can interpolate exception arguments, including a secret.
+        print(scrub_string("".join(traceback.format_exception(exc))))
     render_error(SparkError(
-        f"Unexpected internal error: {type(exc).__name__}: {str(exc)[:200]}",
+        f"Unexpected internal error: {type(exc).__name__}: {scrub_string(raw_message[:200])}",
         code="SPARK_INTERNAL",
         remediation=[
             "Re-run with SPARK_DEBUG=1 for the full traceback.",

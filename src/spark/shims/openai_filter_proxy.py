@@ -31,6 +31,7 @@ libraries). Stdlib only.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import http.client
 import json
 import os
@@ -47,6 +48,11 @@ SERVABLE_FORMATS = ("mlx", "any", "")
 
 #: Request bodies are chat payloads; anything near this is a misbehaving client.
 MAX_BODY_BYTES = 64 * 2**20
+
+#: A model roster changes only when the registry or disk changes. Harness pickers
+#: poll ``/v1/models`` far more often than that, so a computed roster stays valid
+#: for this long before the disk is scanned again.
+ALLOWED_IDS_TTL_S = 30.0
 
 _HOP_HEADERS = {
     "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
@@ -100,11 +106,43 @@ def allowed_ids(served_id: str) -> list[str]:
     return ids
 
 
+#: One cached roster per process, primed when the backend reports ready and
+#: rebuilt only on TTL expiry. ``ids=None`` means "never computed".
+_MODELS_CACHE: dict = {"ids": None, "built_at": 0.0}
+_MODELS_LOCK = threading.RLock()
+
+
+def _refresh_allowed_ids(served_id: str | None = None) -> list[str]:
+    """Recompute and cache the roster — the single disk-scanning seam.
+
+    Called once at startup (see :func:`main`) and again after the TTL expires.
+    A lock makes concurrent handler threads share one rebuild rather than each
+    independently walking the registry/weights on the same poll.
+    """
+    with _MODELS_LOCK:
+        sid = _STATE.get("served_id", "") if served_id is None else served_id
+        ids = allowed_ids(sid)
+        _MODELS_CACHE["ids"] = ids
+        _MODELS_CACHE["built_at"] = time.monotonic()
+        return ids
+
+
+def _cached_ids() -> list[str]:
+    """The cached roster, refreshing it at most once per TTL window."""
+    ids = _MODELS_CACHE["ids"]
+    if ids is None or time.monotonic() - _MODELS_CACHE["built_at"] >= ALLOWED_IDS_TTL_S:
+        with _MODELS_LOCK:
+            ids = _MODELS_CACHE["ids"]
+            if (ids is None
+                    or time.monotonic() - _MODELS_CACHE["built_at"] >= ALLOWED_IDS_TTL_S):
+                ids = _refresh_allowed_ids()
+    return ids
+
+
 def models_payload() -> dict:
-    ids = allowed_ids(_STATE.get("served_id", ""))
     return {
         "object": "list",
-        "data": [{"id": i, "object": "model"} for i in ids],
+        "data": [{"id": i, "object": "model"} for i in _cached_ids()],
     }
 
 
@@ -137,10 +175,11 @@ class _Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def _handle(self) -> None:
-        if _is_models_request(self) and _STATE.get("upstream_ready"):
+        is_models = _is_models_request(self)
+        if is_models and _STATE.get("upstream_ready"):
             self._send_json(200, models_payload())
             return
-        if _is_models_request(self):
+        if is_models:
             self._send_json(503, {"error": "backend not ready"})
             return
         # Passthrough: same method/path/body, hop headers stripped.
@@ -198,15 +237,29 @@ def _spawn_backend(argv: list[str]) -> "subprocess.Popen[bytes]":
     return subprocess.Popen(argv)
 
 
+def _probe_health(parts: urllib.parse.ParseResult, health_path: str) -> bool:
+    """One health poll: drain the body and close both response and connection.
+
+    A long-lived server is polled every few seconds for its whole life; leaking
+    one ``HTTPConnection`` per poll accumulates sockets/fds until the process
+    runs out. Reading the body also lets the socket close cleanly instead of
+    stranding unread bytes on a half-open connection.
+    """
+    with contextlib.closing(
+        http.client.HTTPConnection(parts.hostname, parts.port or 80, timeout=5)
+    ) as conn:
+        conn.request("GET", health_path)
+        with contextlib.closing(conn.getresponse()) as resp:
+            resp.read()
+            return 200 <= resp.status < 300
+
+
 def _wait_ready(upstream: str, health_path: str, timeout_s: float) -> bool:
     parts = urllib.parse.urlparse(upstream)
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
         try:
-            conn = http.client.HTTPConnection(parts.hostname, parts.port or 80,
-                                              timeout=5)
-            conn.request("GET", health_path)
-            if 200 <= conn.getresponse().status < 300:
+            if _probe_health(parts, health_path):
                 return True
         except (OSError, http.client.HTTPException):
             pass
@@ -240,10 +293,7 @@ def _monitor(child: "subprocess.Popen[bytes]", upstream: str, health_path: str,
                   file=sys.stderr, flush=True)
             os._exit(1)
         try:
-            conn = http.client.HTTPConnection(parts.hostname, parts.port or 80,
-                                              timeout=5)
-            conn.request("GET", health_path)
-            ok = 200 <= conn.getresponse().status < 300
+            ok = _probe_health(parts, health_path)
         except (OSError, http.client.HTTPException):
             ok = False
         failures = 0 if ok else failures + 1
@@ -296,6 +346,9 @@ def main(argv=None) -> int:
             print("[proxy] FATAL: backend never became ready", file=sys.stderr)
             _terminate_child(child)
             return 1
+        # Prime the roster while still single-threaded, before the ready flag
+        # lets handler threads answer /v1/models.
+        _refresh_allowed_ids(args.served_id)
         _STATE["upstream_ready"] = True
         threading.Thread(target=_monitor,
                          args=(child, args.upstream, args.health_path,

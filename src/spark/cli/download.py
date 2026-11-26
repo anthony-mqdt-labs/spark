@@ -32,9 +32,7 @@ from ..registry.store import dir_bytes as _dir_bytes
 from .context import SparkCtx, build_context, refresh_catalog
 from .render import console
 
-_QUANT_RE = re.compile(r"\b(q[2-8])(?:_[a-z0-9]+)?\b", re.I)
-_BIT_RE = re.compile(r"\b([2-8])\s*-?bit\b", re.I)
-_PARAM_RE = re.compile(r"\b(\d+(?:\.\d+)?)\s*b\b", re.I)
+from ..inventory import infer_quant_and_params
 
 
 def _slug(repo: str) -> str:
@@ -54,19 +52,11 @@ def _infer(repo: str) -> dict:
         fmt = "mlx-vlm" if _VLM_RE.search(name) else "mlx"
     else:
         fmt = "any"
-    quant_m = _QUANT_RE.search(name)
-    bit_m = _BIT_RE.search(name)
-    param_m = _PARAM_RE.search(name)
-    if quant_m:
-        quant = quant_m.group(1).lower()
-    elif bit_m:
-        quant = f"q{bit_m.group(1)}"   # '4bit' -> 'q4'
-    else:
-        quant = ""
+    quant, params = infer_quant_and_params(name)
     return {
         "model_format": fmt,
-        "quant": quant,
-        "params_billions": (float(param_m.group(1)) if param_m else None),
+        "quant": quant,           # '4bit' -> 'q4' (shared with discovery/adopt)
+        "params_billions": params,
     }
 
 

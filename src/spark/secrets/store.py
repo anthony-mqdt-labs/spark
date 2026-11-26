@@ -17,7 +17,8 @@ from __future__ import annotations
 import re
 from abc import ABC, abstractmethod
 
-from ..telemetry import get_telemetry, register_secret_value
+from ..redaction import register_secret_value
+from ..telemetry import get_telemetry
 
 # Secret names are constrained to a safe charset so they can never be used to
 # inject arguments into the backend CLI.

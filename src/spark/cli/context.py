@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import uuid
 from dataclasses import dataclass
 
@@ -38,7 +39,7 @@ def build_context() -> SparkCtx:
     telemetry.retention_days = config.general.log_retention_days
     telemetry.info(
         "cli", "session_start",
-        version=_version(), argv_count=len(os.sys.argv),
+        version=spark_version(), argv_count=len(sys.argv),
     )
     secrets = get_secret_store(paths)
     return SparkCtx(
@@ -57,15 +58,19 @@ def refresh_catalog(ctx: "SparkCtx", *, model_id: str = "") -> None:
     have to run `spark list` to notice a model appeared or was forgotten, but a
     failure to write it must never fail the command that changed the registry.
     """
-    try:
-        from ..catalog import write_catalog
+    from ..catalog import safe_write_catalog
 
-        write_catalog(ctx.paths, ctx.config)
-    except Exception as exc:  # noqa: BLE001 - publishing is a courtesy
-        ctx.telemetry.warn("catalog", "write_failed", model_id=model_id, error=repr(exc))
+    safe_write_catalog(
+        ctx.paths, ctx.config,
+        component="catalog", event="write_failed", model_id=model_id,
+    )
 
 
-def _version() -> str:
+def spark_version() -> str:
+    """Installed spark version; the single metadata lookup for the CLI.
+
+    Never raises: completion and startup telemetry must stay quiet offline.
+    """
     try:
         from importlib.metadata import version
 

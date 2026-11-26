@@ -13,6 +13,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ..errors import SparkError
+
 ModelFormat = Literal["mlx", "mlx-vlm", "gguf", "ollama", "safetensors", "prism", "any"]
 
 
@@ -44,9 +46,47 @@ def id_file_stem(model_id: str) -> str:
     return check_model_id(model_id, allow_owner=True).replace("/", "--")
 
 
+#: Keys that must never come from research output (the card is untrusted text).
+#: Spark owns the bind host/port from bundled TOML and the model path from the
+#: registry: an appended ``--host``, ``--port`` or ``--model`` would silently
+#: rebind the server or load weights from an attacker-chosen location while
+#: still passing D11's "is this a real flag?" check.
+_RESERVED_OVERRIDE_KEYS = frozenset({"host", "port", "model"})
+
+
+class LaunchOverrideError(SparkError):
+    """A launch override tried to seize a flag spark alone owns."""
+
+    code = "CFG_OVERRIDE_FORBIDDEN"
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+        super().__init__(
+            f"launch override {key!r} is reserved: bind host, port and model path "
+            "are owned by spark, not by research output.",
+            remediation=[
+                f"Remove {key!r} from launch_overrides.",
+                "Set the bind host/port in config/defaults.toml (or a user override).",
+                "Register the weights path in the model registry, not via --model.",
+                f"Discard the staged research: spark config review <model> --reject, "
+                "then re-run spark research <model>.",
+            ],
+            context={"key": key},
+        )
+
+
+def check_reserved_override_keys(v: dict[str, str]) -> dict[str, str]:
+    """Reject overrides that would rebind the server or redirect its weights."""
+    for k in v:
+        if isinstance(k, str) and k.strip().lstrip("-").strip().lower() in _RESERVED_OVERRIDE_KEYS:
+            raise LaunchOverrideError(k)
+    return v
+
+
 def check_override_keys(v: dict[str, str]) -> dict[str, str]:
     """launch_overrides keys become argv flags (D9). A key that is not a
     ``-``-prefixed flag would land as a stray positional argument."""
+    check_reserved_override_keys(v)
     for k in v:
         if not isinstance(k, str) or not re.fullmatch(r"--?[A-Za-z0-9][A-Za-z0-9_.-]*", k):
             raise ValueError(f"launch override key {k!r} is not a CLI flag (expected --name)")
@@ -179,14 +219,19 @@ class DiskPolicy(_Strict):
 
 
 class GeneralConfig(_Strict):
-    host: str = "127.0.0.1"            # bind localhost only by default (no LAN exposure)
-    port_range: tuple[int, int] = (8080, 8099)
-    log_retention_days: int = Field(7, ge=1)
+    """Host policy owned by ``config/defaults.toml``.
+
+    Every field here is REQUIRED: a missing bundled TOML must fail loudly instead
+    of silently binding a different port range (the 8080 default was never the
+    consumer-pinned 8095 canonical endpoint).
+    """
+
+    host: str                       # loopback only; no LAN exposure by default
+    port_range: tuple[int, int]
+    log_retention_days: int = Field(..., ge=1)
     # Backend preference, highest priority first. Used to pick among capable
     # runtimes for a given model on this host.
-    preference: list[str] = Field(
-        default_factory=lambda: ["mlx_lm", "mlx_vlm", "llama_cpp", "omlx", "ollama"]
-    )
+    preference: list[str]
 
     @field_validator("port_range")
     @classmethod
@@ -242,7 +287,9 @@ class ResearchConfig(_Strict):
 class SparkConfig(_Strict):
     """Top-level resolved configuration handed to business logic."""
 
-    general: GeneralConfig = Field(default_factory=GeneralConfig)
+    # Required: the whole [general] table comes from bundled TOML, never from a
+    # Python literal (config is data, not code).
+    general: GeneralConfig
     memory: MemoryPolicy = Field(default_factory=MemoryPolicy)
     disk: DiskPolicy = Field(default_factory=DiskPolicy)
     supervisor: SupervisorPolicy = Field(default_factory=SupervisorPolicy)

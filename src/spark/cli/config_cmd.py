@@ -3,10 +3,60 @@
 from __future__ import annotations
 
 import click
+from pydantic import ValidationError
 
 from ..config.loader import load_config
 from ..config.paths import bundled_config_dir, resolve_paths
 from .render import console
+
+
+def _accept_output(*, entry, output, ctx, staged: bool) -> None:
+    """The one validate → warn → refuse → save → publish pipeline.
+
+    Used by both ``config review --accept`` (staged output) and ``config import``
+    (stdin output). They must not drift: the only differences are the error
+    wording, whether the staging file is deleted, and the final message.
+    """
+    from ..errors import ConfigError
+    from ..registry import save_model
+    from ..research import delete_staged
+    from ..research.validate import validate_accept
+    from .context import refresh_catalog
+
+    candidate, errors, warnings = validate_accept(entry, output, ctx.config)
+    for w in warnings:
+        console.print(f"[yellow]![/yellow] [dim]{w}[/dim]")
+    if errors:
+        remediation = [f"Drop it: {e}" for e in errors]
+        if staged:
+            remediation += [
+                f"Or hand-edit the entry: {ctx.paths.models_dir / (entry.id + '.toml')}",
+                f"Or re-run: spark research {entry.id} "
+                "(staging is kept until --accept/--reject)",
+            ]
+        else:
+            remediation.append("Or hand-edit the entry after importing without overrides.")
+        source = "Staged" if staged else "Imported"
+        raise ConfigError(
+            f"{source} research for '{entry.id}' names flags its backend does not have.",
+            code="CFG_RESEARCH_FLAGS",
+            remediation=remediation,
+            context={"model": entry.id, "backend": candidate.backend},
+        )
+
+    save_model(candidate, ctx.paths)
+    if staged:
+        delete_staged(ctx.paths, entry.id)
+    ctx.telemetry.info(
+        "research", "accepted" if staged else "imported",
+        model_id=candidate.id, backend=candidate.backend,
+    )
+    refresh_catalog(ctx, model_id=candidate.id)
+    action = "applied" if staged else "imported"
+    quant = f", quant={candidate.quant or '—'}" if staged else ""
+    console.print(
+        f"[green]✓[/green] {action} → backend=[magenta]{candidate.backend}[/magenta]{quant}"
+    )
 
 
 @click.group(name="config")
@@ -51,10 +101,10 @@ def config_review(model: str, accept: bool, reject: bool):
     """Review (and accept/reject) staged research output for MODEL."""
     import json as _json
 
-    from ..registry import resolve_model, save_model
+    from ..registry import resolve_model
     from ..research import delete_staged, load_staged
     from ..research.types import ResearchOutput
-    from .context import build_context, refresh_catalog
+    from .context import build_context
 
     if accept and reject:
         raise click.UsageError("--accept and --reject are mutually exclusive.")
@@ -77,7 +127,7 @@ def config_review(model: str, accept: bool, reject: bool):
     if accept:
         try:
             output = ResearchOutput.model_validate(staged.get("output"))
-        except Exception as exc:  # pydantic ValidationError
+        except ValidationError as exc:
             from ..errors import ConfigError
 
             raise ConfigError(
@@ -90,30 +140,7 @@ def config_review(model: str, accept: bool, reject: bool):
                 context={"model": entry.id},
                 cause=exc,
             ) from exc
-        from ..research.validate import validate_accept
-
-        candidate, errors, warnings = validate_accept(entry, output, ctx.config)
-        for w in warnings:
-            console.print(f"[yellow]![/yellow] [dim]{w}[/dim]")
-        if errors:
-            from ..errors import ConfigError
-
-            raise ConfigError(
-                f"Staged research for '{entry.id}' names flags its backend does not have.",
-                code="CFG_RESEARCH_FLAGS",
-                remediation=[
-                    *[f"Drop it: {e}" for e in errors],
-                    f"Or hand-edit the entry: {ctx.paths.models_dir / (entry.id + '.toml')}",
-                    f"Or re-run: spark research {entry.id} (staging is kept until --accept/--reject)",
-                ],
-                context={"model": entry.id, "backend": candidate.backend},
-            )
-        save_model(candidate, ctx.paths)
-        delete_staged(ctx.paths, entry.id)
-        ctx.telemetry.info("research", "accepted", model_id=candidate.id, backend=candidate.backend)
-        refresh_catalog(ctx, model_id=candidate.id)
-        console.print(f"[green]✓[/green] applied → backend=[magenta]{candidate.backend}[/magenta], "
-                      f"quant={candidate.quant or '—'}")
+        _accept_output(entry=entry, output=output, ctx=ctx, staged=True)
         return
     console.print("\n[dim]--accept to apply, --reject to discard[/dim]")
 
@@ -125,10 +152,9 @@ def config_import(model: str):
     import json as _json
     import sys
 
-    from ..registry import resolve_model, save_model
+    from ..registry import resolve_model
     from ..research.types import ResearchOutput
-    from ..research.validate import validate_accept
-    from .context import build_context, refresh_catalog
+    from .context import build_context
 
     ctx = build_context()
     entry = resolve_model(model, ctx.paths)
@@ -137,7 +163,7 @@ def config_import(model: str):
         data = _json.loads(raw)
         # accept either a bare output or a staged-doc wrapper
         output = ResearchOutput.model_validate(data.get("output", data))
-    except Exception as exc:
+    except (ValueError, ValidationError) as exc:
         from ..errors import ConfigError
 
         raise ConfigError(
@@ -146,22 +172,4 @@ def config_import(model: str):
                          "See `spark config show` and the research schema."],
             cause=exc,
         ) from exc
-    candidate, errors, warnings = validate_accept(entry, output, ctx.config)
-    for w in warnings:
-        console.print(f"[yellow]![/yellow] [dim]{w}[/dim]")
-    if errors:
-        from ..errors import ConfigError
-
-        raise ConfigError(
-            f"Imported research for '{entry.id}' names flags its backend does not have.",
-            code="CFG_RESEARCH_FLAGS",
-            remediation=[
-                *[f"Drop it: {e}" for e in errors],
-                f"Or hand-edit the entry after importing without overrides.",
-            ],
-            context={"model": entry.id, "backend": candidate.backend},
-        )
-    save_model(candidate, ctx.paths)
-    ctx.telemetry.info("research", "imported", model_id=candidate.id, backend=candidate.backend)
-    refresh_catalog(ctx, model_id=candidate.id)
-    console.print(f"[green]✓[/green] imported → backend=[magenta]{candidate.backend}[/magenta]")
+    _accept_output(entry=entry, output=output, ctx=ctx, staged=False)

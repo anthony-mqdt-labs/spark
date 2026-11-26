@@ -20,7 +20,7 @@ from pathlib import Path
 from ..config.schema import ModelEntry
 from ..errors import RuntimeBackendError
 from ..hf_cache import snapshot_dir as _hf_cache_snapshot
-from .base import Backend, register
+from .base import Backend, override_flags, register
 
 
 def shim_path() -> Path:
@@ -97,10 +97,5 @@ class PrismMlBackend(Backend):
             "--host", host,
             "--port", str(port),
             "--model-id", entry.id,
-            *self._override_flags(entry),
+            *override_flags(entry.launch_overrides),
         ]
-
-    def _override_flags(self, entry: ModelEntry) -> list[str]:
-        from .base import override_flags
-
-        return override_flags(entry.launch_overrides)

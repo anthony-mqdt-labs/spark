@@ -11,20 +11,13 @@ depth:
 
 from __future__ import annotations
 
-import re
-
 from ..errors import SparkError
-from ..telemetry.jsonl import _secret_values, _secret_lock
+from ..redaction import CREDENTIAL_PATTERNS, secret_values
 
-# Known credential shapes (HF, OpenAI, AWS, generic bearer/sk- tokens, etc.).
-_TOKEN_PATTERNS = [
-    re.compile(r"\bhf_[A-Za-z0-9]{20,}\b"),
-    re.compile(r"\bsk-[A-Za-z0-9_-]{20,}\b"),
-    re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
-    re.compile(r"\bghp_[A-Za-z0-9]{20,}\b"),
-    re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b"),
-    re.compile(r"(?i)\b(bearer)\s+[A-Za-z0-9._-]{20,}\b"),
-]
+# Known credential shapes are owned by the shared redaction registry, not by the
+# logger: the guard and the log scrubber must agree on what a credential looks
+# like (and a telemetry refactor must not silently disable this check).
+_TOKEN_PATTERNS = CREDENTIAL_PATTERNS
 
 
 class SecretLeakError(SparkError):
@@ -35,9 +28,7 @@ class SecretLeakError(SparkError):
 def assert_no_secrets(prompt: str) -> None:
     """Raise SecretLeakError if the prompt appears to contain secret material."""
     # (a) Exact registered secret values.
-    with _secret_lock:
-        registered = tuple(_secret_values)
-    for v in registered:
+    for v in secret_values():
         if v and v in prompt:
             raise SecretLeakError(
                 "Refusing to send a research prompt: it contains a known secret value.",

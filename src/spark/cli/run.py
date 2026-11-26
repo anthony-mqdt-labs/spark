@@ -30,9 +30,11 @@ def run_command(model: str, backend_override: str | None, dflash: bool,
     from ..errors import ModelNotFoundError
     from ..inventory import build_inventory, resolve_for_run
 
-    hit = resolve_for_run(model, ctx.paths, ctx.config)
+    # One scan serves both resolution and the "did you mean" suggestions; a
+    # failed run used to scan the whole hub cache twice.
+    inv = build_inventory(ctx.paths, ctx.config, with_bytes=False)
+    hit = resolve_for_run(model, ctx.paths, ctx.config, inventory=inv)
     if hit is None:
-        inv = build_inventory(ctx.paths, ctx.config, with_bytes=False)
         suggestions = inv.runnable_ids[:8]
         remediation = []
         if suggestions:
@@ -126,12 +128,9 @@ def run_command(model: str, backend_override: str | None, dflash: bool,
 
 def _print_ready(model_id: str, label: str, info) -> None:
     """Vite-style clean startup banner, printed the moment the server is healthy."""
-    from importlib.metadata import version
+    from .context import spark_version
 
-    try:
-        ver = version("spark")
-    except Exception:
-        ver = "0.0.0"
+    ver = spark_version()
     console.print()
     console.print(f"  [bold green]spark[/bold green] [dim]v{ver}[/dim]  "
                   f"ready in [bold]{info.elapsed_s:.1f}s[/bold]")

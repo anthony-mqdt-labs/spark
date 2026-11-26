@@ -2,11 +2,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import TYPE_CHECKING
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 
 from ..errors import SparkError
+
+if TYPE_CHECKING:
+    from ..inventory import Inventory
+    from ..probe.host import HostProfile
+    from ..registry.store import StoreIssue
 
 console = Console()
 err_console = Console(stderr=True)
@@ -32,7 +40,7 @@ def render_error(exc: SparkError) -> None:
     )
 
 
-def render_server_log(log_path, tail: str) -> None:
+def render_server_log(log_path: str | Path, tail: str) -> None:
     """On launch failure, show the tail of the child server log (its output was
     redirected off the terminal to keep startup clean)."""
     if not tail.strip():
@@ -47,7 +55,7 @@ def render_server_log(log_path, tail: str) -> None:
     )
 
 
-def runtimes_table(profile) -> Table:
+def runtimes_table(profile: HostProfile) -> Table:
     t = Table(title="Runtimes", expand=False)
     t.add_column("runtime", style="cyan")
     t.add_column("status")
@@ -68,7 +76,7 @@ def _fmt_bytes(n: int) -> str:
     return f"{n / 2**20:.0f} MiB"
 
 
-def render_store_issues(issues) -> None:
+def render_store_issues(issues: list[StoreIssue]) -> None:
     """Warn about partial/orphaned model-store dirs with resume/clean steps."""
     if not issues:
         return
@@ -94,7 +102,7 @@ def render_store_issues(issues) -> None:
         console.print(f"    resume: [bold]{resume}[/bold]  ·  clean: rm -rf {i.path}")
 
 
-def runnable_table(inv) -> Table:
+def runnable_table(inv: Inventory) -> Table:
     """What this host can serve right now: disk truth, registry or not.
 
     Registered models show their backend; discovered-but-unregistered ones show
@@ -130,7 +138,7 @@ def runnable_table(inv) -> Table:
     return t
 
 
-def render_inventory_notes(inv, *, verbose: bool = False) -> None:
+def render_inventory_notes(inv: Inventory, *, verbose: bool = False) -> None:
     """One-line pointers for everything that is *not* runnable.
 
     Missing entries name their fix; unregistered runnable models name `adopt`;

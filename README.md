@@ -198,7 +198,7 @@ spark/
 │   ├── research/                # types/guard/prompt/providers/chain/staging/validate
 │   ├── telemetry/               # jsonl.py (structured logging + redaction)
 │   └── errors.py                # typed errors carrying remediation
-├── tests/                       # pytest (173 tests)
+├── tests/                       # pytest (368 tests)
 ├── spikes/                      # time-boxed evaluation spikes + the portable
 │                                #   human/emotion eval skill (spikes/README.md)
 ├── bake-offs/                   # comparative model bake-offs — quality evals,
@@ -405,6 +405,14 @@ Adapters and their quirks:
 - **`vllm`** — registered with `requires_os=["Linux"]` + `unavailable_reason`; on
   this host `is_available()=False` with actionable guidance. Kept so the config
   travels unchanged to a CUDA host.
+- **`relay`** — attach-only proxy to an external OpenAI-compatible service
+  (`relay_base_url` in its TOML); never spawns or kills a process. It owns its
+  weights, so the launch preflight does not look for local ones. See
+  `RELAY-USAGE.md`.
+- **`darkcore`** — spawns the patchwork dynamic router under the supervisor
+  (`python -m darkcore.server` from its own uv venv, set via `$DARKCORE_ROUTER_DIR`).
+  Like relay, the router resolves its own tier weights. See
+  `specs/0003-sdcpp-image-runtime/prd.md` for the seam precedent.
 
 ### Probe (`src/spark/probe/`)
 Detects chip/memory/cores + per-runtime presence (`shutil.which`), version
@@ -770,7 +778,7 @@ result), `process_crash`, `restart_scheduled`, `process_exit` (wall time, peak R
 
 ## 12. Testing
 
-`uv run pytest` — 231 tests, no live LLM/Keychain required for the suite (the
+`uv run pytest` — 368 tests, no live LLM/Keychain required for the suite (the
 Keychain roundtrip test self-skips off macOS; research uses fake providers and a
 real-subprocess JSON test that needs no model). Coverage spans: config
 merge/precedence, secret redaction + name validation, Keychain roundtrip, probe

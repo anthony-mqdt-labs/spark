@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from ..errors import SparkError
 from ..telemetry import get_telemetry
 from .providers import ResearchProvider
-from .types import ResearchOutput, ResearchRequest
+from .types import ResearchExhaustedError, ResearchOutput, ResearchRequest, ResearchUnavailableError
 
 
 @dataclass
@@ -43,7 +42,7 @@ class ResearchChain:
                 continue
 
         if attempted == 0:
-            raise SparkError(
+            raise ResearchUnavailableError(
                 "No research providers are available.",
                 code="NET_RESEARCH_UNAVAILABLE",
                 remediation=[
@@ -51,7 +50,7 @@ class ResearchChain:
                     "Or import a config manually: spark config import <model> < result.json",
                 ],
             )
-        raise SparkError(
+        raise ResearchExhaustedError(
             f"All {attempted} research provider(s) failed.",
             code="NET_RESEARCH_EXHAUSTED",
             remediation=[

@@ -115,6 +115,12 @@ def test_supervisor_secret_env_only_logs_var_names(paths):
     sup = Supervisor(backend, ModelEntry(id="m"), cfg, _profile(), paths, store)
     env = sup._child_env()
     assert env["HF_TOKEN"] == "secret-abc-123"
+    # The event must name only the env var, never its value. This is the actual
+    # leak this test claims to guard (the old version only checked injection).
+    window = sup.log.context_window()
+    assert "secret-abc-123" not in repr(window)
+    events = [e for e in window if e.get("event") == "secret_env_resolved"]
+    assert events and events[-1].get("vars_set") == ["HF_TOKEN"]
 
 
 # --- weight availability gate ---------------------------------------------------

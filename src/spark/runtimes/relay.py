@@ -62,8 +62,9 @@ class RelayBackend(Backend):
     def prepare(self, entry: ModelEntry, *, secrets=None) -> None:
         """Pre-flight check: verify the external relay service is reachable.
 
-        Logs a warning if the endpoint appears unreachable, but does not raise
-        (allows launch to proceed; supervisor will detect health failure).
+        Raises a typed ``LaunchError`` when no relay URL is configured. A
+        configured but unreachable endpoint only warns: the supervisor's health
+        gate will surface the failure with remediation.
         """
         log = get_telemetry()
         base_url = self.rt.server.relay_base_url
@@ -89,7 +90,7 @@ class RelayBackend(Backend):
             log.warn(
                 "relay",
                 "external_service_unreachable",
-                url=base_url,
-                reason=str(exc),
+                url=base_url,  # configured URL, never the exception message
+                reason=type(exc).__name__,
             )
             # Don't raise: let supervisor discover the failure via health checks

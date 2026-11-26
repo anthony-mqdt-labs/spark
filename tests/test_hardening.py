@@ -36,7 +36,8 @@ from spark.research.staging import load_staged
 from spark.research.validate import validate_flags
 from spark.runner import Supervisor
 from spark.runtimes.base import Backend, entry_for_backend
-from spark.telemetry.jsonl import Telemetry, _is_sensitive_key
+from spark.redaction import is_sensitive_key as _is_sensitive_key
+from spark.telemetry.jsonl import Telemetry
 from helpers import FakeStore
 
 

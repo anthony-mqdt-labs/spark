@@ -31,10 +31,14 @@ import json
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from .config.paths import SparkPaths
-from .config.schema import ModelEntry
+from .config.schema import ModelEntry, ModelFormat
 from .hf_cache import bytes_in, hf_cache_root, snapshot_dir
+
+if TYPE_CHECKING:
+    from .registry.availability import Availability
 
 #: Marker files/dirs that identify a snapshot as a sentence-transformers
 #: embedding model rather than a generative one.
@@ -51,6 +55,30 @@ _EMBEDDING_TYPES = {"bert", "xlm-roberta", "roberta", "distilbert", "albert", "e
 _PRISM_TYPE = "prism_hadamard_qwen35"
 
 _QUANT_RE = re.compile(r"\b(q[2-8])(?:_[a-z0-9]+)?\b", re.I)
+_BIT_RE = re.compile(r"\b([2-8])\s*-?bit\b", re.I)
+_PARAM_RE = re.compile(r"\b(\d+(?:\.\d+)?)\s*b\b", re.I)
+
+
+def infer_quant_and_params(name: str) -> tuple[str, float | None]:
+    """Infer quant tag and parameter count from a repo/directory name.
+
+    One implementation for download, adopt, discovery and the launch preflight:
+    these used to disagree (``4bit`` was understood only by ``download``), which
+    silently disabled the memory gate for the very models most likely to be too
+    large for this host.
+    """
+    text = (name or "").lower()
+    quant_match = _QUANT_RE.search(text)
+    bit_match = _BIT_RE.search(text)
+    param_match = _PARAM_RE.search(text)
+    if quant_match:
+        quant = quant_match.group(1).lower()
+    elif bit_match:
+        quant = f"q{bit_match.group(1)}"
+    else:
+        quant = ""
+    params = float(param_match.group(1)) if param_match else None
+    return quant, params
 
 
 @dataclass(frozen=True)
@@ -72,8 +100,8 @@ class DiscoveredModel:
     kind: str = "unknown"
     #: Human reason when not servable ("" when servable).
     reason: str = ""
-    #: Format guess for backend selection ("mlx" | "gguf" | "any").
-    model_format: str = "any"
+    #: Format guess for backend selection (a validated ModelFormat tag).
+    model_format: ModelFormat = "any"
     quant: str = ""
     #: Registry id when these weights back a registered entry, else "".
     registry_id: str = ""
@@ -150,7 +178,7 @@ def classify_snapshot(snap: Path) -> tuple[str, str]:
     return "unknown", "no recognizable weights"
 
 
-def _guess_format(repo: str, snap: Path) -> str:
+def _guess_format(repo: str, snap: Path) -> ModelFormat:
     if repo and "gguf" in repo.lower():
         return "gguf"
     try:
@@ -167,8 +195,7 @@ def _guess_format(repo: str, snap: Path) -> str:
 
 
 def _guess_quant(repo: str) -> str:
-    m = _QUANT_RE.search(repo or "")
-    return m.group(1).lower() if m else ""
+    return infer_quant_and_params(repo)[0]
 
 
 def scan_hub_cache(*, with_bytes: bool = True) -> list[DiscoveredModel]:
@@ -264,15 +291,15 @@ class Inventory:
     """The join of disk truth and registry intentions, categorized for the CLI."""
 
     #: (entry, availability-state) for registered models whose weights are present.
-    runnable_registered: list[tuple[ModelEntry, object]] = field(default_factory=list)
+    runnable_registered: list[tuple[ModelEntry, Availability]] = field(default_factory=list)
     #: Servable weights on disk with no registry entry. Runnable right now.
     runnable_discovered: list[DiscoveredModel] = field(default_factory=list)
     #: (entry, availability) for entries asserting absent weights.
-    missing: list[tuple[ModelEntry, object]] = field(default_factory=list)
+    missing: list[tuple[ModelEntry, Availability]] = field(default_factory=list)
     #: (entry, availability) for runtimes that own their weights.
-    external: list[tuple[ModelEntry, object]] = field(default_factory=list)
+    external: list[tuple[ModelEntry, Availability]] = field(default_factory=list)
     #: (entry, availability) for entries asserting nothing.
-    unverifiable: list[tuple[ModelEntry, object]] = field(default_factory=list)
+    unverifiable: list[tuple[ModelEntry, Availability]] = field(default_factory=list)
     #: Cached repos spark cannot serve. Never offered; reported as a count.
     non_servable: list[DiscoveredModel] = field(default_factory=list)
 
@@ -301,7 +328,7 @@ def build_inventory(
         entries = list_models(paths)
     except OSError:
         entries = []
-    avail = availability_map(entries, paths, config=config)
+    avail = availability_map(entries, paths, config=config, with_bytes=with_bytes)
 
     by_hf_repo: dict[str, ModelEntry] = {}
     by_path: dict[str, ModelEntry] = {}
@@ -343,19 +370,7 @@ def build_inventory(
         if disc.location in claimed_locations:
             continue
         if disc.servable:
-            inv.runnable_discovered.append(
-                DiscoveredModel(
-                    display_id=disc.display_id,
-                    repo=disc.repo,
-                    source=disc.source,
-                    location=disc.location,
-                    bytes_present=disc.bytes_present,
-                    kind=disc.kind,
-                    reason=disc.reason,
-                    model_format=disc.model_format,
-                    quant=disc.quant,
-                )
-            )
+            inv.runnable_discovered.append(disc)
         elif disc.kind == "partial":
             # A partial store dir is neither runnable nor cached-elsewhere; the
             # store-issues warning owns it. Keep it out of every list here.
@@ -374,13 +389,18 @@ def synthesize_entry(disc: DiscoveredModel) -> ModelEntry:
     launch preflight: hub models resolve via ``hf_repo`` (the runtime reads the
     hub cache directly, no re-download), store models via ``path``.
     """
+    quant, params = infer_quant_and_params(disc.display_id)
+    # A fast with_bytes=False scan leaves only a 0/1 presence marker, not a size.
+    size = disc.bytes_present if disc.bytes_present > 1 else None
     if disc.source == "hub":
         return ModelEntry(
             id=disc.display_id,
             hf_repo=disc.repo,
             path="",
-            model_format=disc.model_format,  # type: ignore[arg-type]
-            quant=disc.quant,
+            model_format=disc.model_format,
+            quant=disc.quant or quant,
+            params_billions=params,
+            size_bytes=size,
             research_status="pending",
             notes="ephemeral: weights found on disk, not in the registry "
             "(persist with `spark adopt`)",
@@ -390,7 +410,9 @@ def synthesize_entry(disc: DiscoveredModel) -> ModelEntry:
         hf_repo="",
         path=disc.location,
         model_format="any",
-        quant=disc.quant,
+        quant=disc.quant or quant,
+        params_billions=params,
+        size_bytes=size,
         research_status="pending",
         notes="ephemeral: weights found in the spark store, not in the registry "
         "(persist with `spark adopt`)",
@@ -402,71 +424,49 @@ class RunResolution:
     entry: ModelEntry
     ephemeral: bool
     via: str  # "registry" | "hub" | "store"
+    #: The inventory already scanned for this resolution. Callers producing a
+    #: "no match" error must reuse it for suggestions instead of rescanning disk.
+    inventory: Inventory | None = None
 
 
-def resolve_for_run(query: str, paths: SparkPaths, config=None) -> RunResolution | None:
+def resolve_for_run(
+    query: str,
+    paths: SparkPaths,
+    config=None,
+    *,
+    inventory: Inventory | None = None,
+) -> RunResolution | None:
     """Resolve a run target against disk truth first, registry second.
 
     Order: registry exact id/alias → hub repo exact → store dirname exact →
     unique prefix/substring across all runnable names. Returns None when nothing
     matches (the caller raises with suggestions from the inventory).
     """
-    q = (query or "").strip()
-    if not q:
+    from .registry.models import fuzzy_match
+
+    if not (query or "").strip():
         return None
-    ql = q.lower()
-    inv = build_inventory(paths, config=config, with_bytes=False)
-    reg_by_id = {e.id.lower(): e for e, _ in inv.runnable_registered}
-    reg_by_id.update({e.id.lower(): e for e, _ in inv.external})
-    reg_by_id.update({e.id.lower(): e for e, _ in inv.unverifiable})
-    if ql in reg_by_id:
-        return RunResolution(entry=reg_by_id[ql], ephemeral=False, via="registry")
-    # Aliases of runnable/external entries.
-    for e, _ in (*inv.runnable_registered, *inv.external, *inv.unverifiable):
-        if any(a.lower() == ql for a in e.aliases):
-            return RunResolution(entry=e, ephemeral=False, via="registry")
-
-    hub = {m.display_id.lower(): m for m in inv.runnable_discovered if m.source == "hub"}
-    if ql in hub:
-        return RunResolution(entry=synthesize_entry(hub[ql]), ephemeral=True, via="hub")
-    store = {
-        m.display_id.lower(): m for m in inv.runnable_discovered if m.source == "store"
-    }
-    if ql in store:
-        return RunResolution(entry=synthesize_entry(store[ql]), ephemeral=True, via="store")
-
-    # Unique prefix, then unique substring, across every runnable name.
+    inv = inventory if inventory is not None else build_inventory(
+        paths, config=config, with_bytes=False
+    )
+    # One candidate list serves exact id, alias, exact discovered name, unique
+    # prefix/substring and unique repo tail — the same rule as registry/adopt.
     names: list[tuple[str, RunResolution]] = []
     for e, _ in (*inv.runnable_registered, *inv.external, *inv.unverifiable):
-        names.append(
-            (e.id.lower(), RunResolution(entry=e, ephemeral=False, via="registry"))
+        resolution = RunResolution(
+            entry=e, ephemeral=False, via="registry", inventory=inv
         )
+        names.append((e.id, resolution))
+        names.extend((alias, resolution) for alias in e.aliases)
     for m in inv.runnable_discovered:
-        names.append(
-            (
-                m.display_id.lower(),
-                RunResolution(entry=synthesize_entry(m), ephemeral=True, via=m.source),
-            )
-        )
-    prefix = [(n, r) for n, r in names if n.startswith(ql)]
-    if len(prefix) == 1:
-        return prefix[0][1]
-    substr = [(n, r) for n, r in names if ql in n]
-    if len(substr) == 1:
-        return substr[0][1]
-    # Also accept the short tail of a hub repo ("bonsai-8b" for
-    # "prism-ml/Ternary-Bonsai-8B-mlx-2bit") when it is unique.
-    tails = [
-        (m.display_id.lower().split("/")[-1], m)
-        for m in inv.runnable_discovered
-        if m.source == "hub"
-    ]
-    tail_hit = [m for t, m in tails if t == ql or t.startswith(ql)]
-    if len(tail_hit) == 1:
-        return RunResolution(
-            entry=synthesize_entry(tail_hit[0]), ephemeral=True, via="hub"
-        )
-    return None
+        names.append((
+            m.display_id,
+            RunResolution(
+                entry=synthesize_entry(m), ephemeral=True, via=m.source, inventory=inv
+            ),
+        ))
+    hit, _ambiguous = fuzzy_match(query, names, tails=True)
+    return hit
 
 
 __all__ = [

@@ -136,6 +136,58 @@ def delete_model(model_id: str, paths: SparkPaths | None = None) -> bool:
 
 
 # --- resolution ----------------------------------------------------------------
+from typing import TypeVar
+
+_T = TypeVar("_T")
+
+
+def fuzzy_match(
+    query: str,
+    candidates: list[tuple[str, _T]],
+    *,
+    tails: bool = False,
+) -> tuple[_T | None, list[_T]]:
+    """One resolution rule for every CLI path: exact -> prefix -> substring ->
+    (optionally) unique repo tail. Returns ``(match, ambiguous_candidates)``.
+
+    Callers used to reimplement this with slightly different rules, so a model
+    could resolve in `spark run` but not in `spark adopt` or completion.
+    """
+    q = (query or "").strip().lower()
+    if not q:
+        return None, []
+
+    def _unique(values: list[_T]) -> list[_T]:
+        seen: set[int] = set()
+        out: list[_T] = []
+        for value in values:
+            key = id(value)
+            if key not in seen:
+                seen.add(key)
+                out.append(value)
+        return out
+
+    exact = _unique([value for name, value in candidates if name.lower() == q])
+    if len(exact) == 1:
+        return exact[0], []
+    if len(exact) > 1:
+        return None, exact
+    prefix = _unique([value for name, value in candidates if name.lower().startswith(q)])
+    if len(prefix) == 1:
+        return prefix[0], []
+    substr = _unique([value for name, value in candidates if q in name.lower()])
+    if len(substr) == 1:
+        return substr[0], []
+    if tails:
+        tail = _unique([
+            value for name, value in candidates
+            if name.lower().split("/")[-1].startswith(q)
+        ])
+        if len(tail) == 1:
+            return tail[0], []
+    return None, _unique(prefix or substr)
+
+
 def resolve_model(query: str, paths: SparkPaths | None = None) -> ModelEntry:
     """Resolve a CLI query to one model: exact id -> alias -> unique
     prefix/substring (case-insensitive)."""
@@ -148,23 +200,13 @@ def resolve_model(query: str, paths: SparkPaths | None = None) -> ModelEntry:
                 "Or list models with: spark list",
             ],
         )
-    q = query.strip().lower()
+    names: list[tuple[str, ModelEntry]] = [(m.id, m) for m in models]
+    for m in models:
+        names.extend((alias, m) for alias in m.aliases)
+    hit, candidates = fuzzy_match(query, names)
+    if hit is not None:
+        return hit
 
-    for m in models:  # exact id
-        if m.id.lower() == q:
-            return m
-    for m in models:  # alias
-        if any(a.lower() == q for a in m.aliases):
-            return m
-
-    prefix = [m for m in models if m.id.lower().startswith(q)]
-    if len(prefix) == 1:
-        return prefix[0]
-    substr = [m for m in models if q in m.id.lower()]
-    if len(substr) == 1:
-        return substr[0]
-
-    candidates = prefix or substr
     if len(candidates) > 1:
         raise AmbiguousModelError(
             f"'{query}' matches multiple models.",

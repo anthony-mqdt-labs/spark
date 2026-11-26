@@ -30,7 +30,7 @@ from .render import console, render_store_issues, runtimes_table
          "(only runtimes installed via `uv tool install`; the command is shown "
          "before it runs).",
 )
-def doctor_command(no_cache: bool, apply_fix: bool):
+def doctor_command(no_cache: bool, apply_fix: bool) -> None:
     """Diagnose host capabilities and runtime availability."""
     ctx = build_context()
     profile = load_or_probe(

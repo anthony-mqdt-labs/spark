@@ -10,11 +10,10 @@ import subprocess
 from abc import ABC, abstractmethod
 
 from ..config.schema import ResearchProviderDef, SparkConfig
-from ..errors import SparkError
 from ..telemetry import get_telemetry
 from .guard import assert_no_secrets
 from .prompt import build_prompt
-from .types import ResearchOutput, ResearchRequest
+from .types import ResearchOutput, ResearchProviderError, ResearchRequest
 
 # Raw-output sample size on parse/validation failure (logging mandate: raw bytes
 # truncated to 256). Head and tail both logged — truncation shows at the tail.
@@ -116,12 +115,16 @@ class CliAgentProvider(ResearchProvider):
                 env=agent_env(self.scrub_env),
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            raise SparkError(f"{self.name}: failed to run ({exc})", code="NET_RESEARCH") from exc
+            raise ResearchProviderError(
+                f"{self.name}: failed to run ({exc})",
+                context={"provider": self.name},
+                cause=exc,
+            ) from exc
 
         if proc.returncode != 0:
-            raise SparkError(
+            raise ResearchProviderError(
                 f"{self.name}: exit {proc.returncode}: {(proc.stderr or '').strip()[:200]}",
-                code="NET_RESEARCH",
+                context={"provider": self.name, "exit_code": proc.returncode},
             )
 
         text = proc.stdout

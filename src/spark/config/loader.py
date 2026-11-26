@@ -15,6 +15,8 @@ import tomllib
 from pathlib import Path
 from typing import Any
 
+from pydantic import ValidationError as PydanticValidationError
+
 from ..errors import ConfigError
 from .paths import SparkPaths, bundled_config_dir, resolve_paths
 from .schema import RuntimeDef, SparkConfig
@@ -26,6 +28,17 @@ def _load_toml(path: Path) -> dict[str, Any]:
             return tomllib.load(fh)
     except FileNotFoundError:
         return {}
+    except OSError as exc:
+        raise ConfigError(
+            f"Cannot read configuration file {path.name}",
+            code="CFG_INVALID",
+            remediation=[
+                f"Check read permissions on {path}",
+                "Run `spark config path` to see the files spark reads.",
+            ],
+            context={"path": str(path)},
+            cause=exc,
+        ) from exc
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(
             f"Malformed TOML in {path.name}",
@@ -88,7 +101,9 @@ def load_config(paths: SparkPaths | None = None) -> SparkConfig:
 
     try:
         return SparkConfig.model_validate(merged)
-    except Exception as exc:  # pydantic ValidationError
+    except PydanticValidationError as exc:
+        # Only a shape/type error in TOML is a config typo. Anything else is a
+        # bug in the loader and must propagate with its own traceback.
         raise ConfigError(
             "Configuration failed validation.",
             code="CFG_INVALID",

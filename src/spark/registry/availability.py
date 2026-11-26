@@ -167,11 +167,18 @@ def availability_map(
     paths: SparkPaths,
     *,
     config: SparkConfig | None = None,
+    with_bytes: bool = True,
 ) -> dict[str, Availability]:
-    """Availability for a whole registry, keyed by model id."""
+    """Availability for a whole registry, keyed by model id.
+
+    ``with_bytes=False`` must be forwarded to every entry: dropping it here
+    turns every completion/proxy/catalog call into a recursive byte walk.
+    """
     return {
         e.id: resolve_availability(
-            e, paths, requires_weights=requires_weights_for(e, config)
+            e, paths,
+            requires_weights=requires_weights_for(e, config),
+            with_bytes=with_bytes,
         )
         for e in entries
     }

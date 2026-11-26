@@ -15,7 +15,10 @@ So before staged output (or a manual import) touches an entry:
 * ``validate_flags`` checks every override the entry *would* carry after the
   merge (staged rec ⊕ pre-existing entry overrides — a backend switch must not
   smuggle the old server's flags along) against the recommended backend's real
-  ``--help`` surface, probed live from the installed binary.
+  ``--help`` surface, probed live from the installed binary. ``--host``,
+  ``--port`` and ``--model`` are refused outright with a typed, actionable
+  error: they are real flags, so the probe would pass while the appended argv
+  rebinds the loopback surface or loads weights from an injected path.
 
 Probing can fail (binary absent, hangs — observed: llama.cpp 0.4.1 compiles
 Metal on first exec and ignores ``--version`` entirely). An unprovable surface
@@ -29,7 +32,7 @@ from __future__ import annotations
 import re
 import subprocess
 
-from ..config.schema import ModelEntry, SparkConfig
+from ..config.schema import ModelEntry, SparkConfig, check_reserved_override_keys
 from .staging import apply_output_to_entry
 from .types import ResearchOutput
 
@@ -90,6 +93,12 @@ def validate_flags(
             [f"Recommended backend '{backend}' is not a known runtime."],
             [],
         )
+    # Reserved keys are a typed refusal with remediation, not just an absent
+    # flag: D11 probes ``--help`` and sees real --host/--port/--model flags, but
+    # appending them would rebind the loopback surface or load attacker weights.
+    # check_reserved_override_keys raises LaunchOverrideError (a SparkError), so
+    # it propagates to the CLI's actionable error renderer.
+    check_reserved_override_keys(overrides)
     # Shape is checked unconditionally: a non-flag key would be saved, then make
     # the entry fail schema validation on every later load.
     for flag in sorted(overrides):

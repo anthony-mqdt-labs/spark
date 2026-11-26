@@ -30,7 +30,14 @@ from pathlib import Path
 #: HF repo id: ``name`` or ``owner/name``; alnum first, then ``[\w.-]``. This is
 #: what keeps a user-typed repo from becoming an ``hf`` option (``-x``), an API
 #: URL query (``a?b``), or a path escape (``..``) in the cache/store.
-REPO_ID_RE = re.compile(r"^[A-Za-z0-9][\w.-]{0,95}(/[A-Za-z0-9][\w.-]{0,95})?$")
+# ``\Z`` (not ``$``): Python's ``$`` also matches *before* a trailing newline,
+# which would let a repo id carrying a newline reach an HF API URL.
+# ASCII-only: ``\w`` admits unicode, which has no place in a cache path segment.
+REPO_ID_RE = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,95}(/[A-Za-z0-9][A-Za-z0-9_.-]{0,95})?\Z"
+)
+#: ``refs/main`` is a commit id, never an arbitrary path component (D14).
+_COMMIT_RE = re.compile(r"[0-9a-fA-F]{40,64}\Z")
 
 
 def is_valid_repo_id(repo: str) -> bool:
@@ -64,9 +71,15 @@ def snapshot_dir(repo: str) -> Path | None:
         return None
     ref = snaps.parent / "refs" / "main"
     if ref.is_file():
-        pinned = snaps / ref.read_text().strip()
-        if (pinned / "config.json").is_file():
-            return pinned
+        # A corrupted/hostile cache must not turn this content into `../..` —
+        # the prism backend inserts the resolved snapshot path into sys.path.
+        token = ref.read_text().strip()
+        if _COMMIT_RE.fullmatch(token):
+            pinned = snaps / token
+            if (pinned / "config.json").is_file() and pinned.resolve().is_relative_to(
+                snaps.resolve()
+            ):
+                return pinned
     valid = [d for d in snaps.iterdir() if (d / "config.json").is_file()]
     return max(valid, key=lambda p: p.stat().st_mtime) if valid else None
 

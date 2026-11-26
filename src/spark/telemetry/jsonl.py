@@ -18,91 +18,19 @@ from __future__ import annotations
 
 import json
 import os
-import re
 import threading
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Deque
 
+from ..redaction import redact, register_secret_value  # re-exported for callers
+
 REQUIRED_LEVELS = ("debug", "info", "warn", "error", "critical")
-_REDACTED = "***REDACTED***"
-
-# Keys whose values are always masked regardless of content.
-_SENSITIVE_KEY_HINTS = (
-    "token",
-    "secret",
-    "password",
-    "passwd",
-    "api_key",
-    "apikey",
-    "authorization",
-    "auth_header",
-    "bearer",
-    "credential",
-)
-
-# Registry of literal secret values to scrub from any logged string. Populated by
-# the secrets layer at the moment a value is read, so even an accidental log of a
-# wrapping object gets cleaned.
-_secret_values: set[str] = set()
-_secret_lock = threading.Lock()
-
-
-def register_secret_value(value: str | None) -> None:
-    """Register a literal secret so the logger masks it everywhere. No-op for
-    short/empty values (avoids masking innocuous substrings)."""
-    if value and len(value) >= 4:
-        with _secret_lock:
-            _secret_values.add(value)
-
-
-def _scrub_string(s: str) -> str:
-    if not _secret_values:
-        return s
-    with _secret_lock:
-        values = tuple(_secret_values)
-    for v in values:
-        if v in s:
-            s = s.replace(v, _REDACTED)
-    return s
-
-
-# "token" as a credential (hf_token, access_token) — not a count or a tokenizer
-# (prompt_tokens, completion_tokens, tokenizer_path), which the inference-event
-# logging contract requires in the clear.
-_TOKEN_NOT_CREDENTIAL = re.compile(r"token(?:s|iz)")
 
 # Envelope fields every record carries; a payload key must never overwrite them
 # (pid= the child's pid would silently replace the emitter's own).
 _RESERVED = frozenset(("ts", "level", "component", "event", "session_id", "pid"))
-
-
-def _is_sensitive_key(key: str) -> bool:
-    k = key.lower()
-    for hint in _SENSITIVE_KEY_HINTS:
-        if hint == "token":
-            if "token" in _TOKEN_NOT_CREDENTIAL.sub("", k):
-                return True
-        elif hint in k:
-            return True
-    return False
-
-
-def _redact(obj: Any, *, key: str | None = None) -> Any:
-    """Recursively redact: mask sensitive keys; scrub literal secrets from strings."""
-    if key is not None and _is_sensitive_key(key):
-        return _REDACTED
-    if isinstance(obj, dict):
-        return {k: _redact(v, key=str(k)) for k, v in obj.items()}
-    if isinstance(obj, (list, tuple)):
-        return [_redact(v) for v in obj]
-    if isinstance(obj, str):
-        return _scrub_string(obj)
-    if isinstance(obj, (int, float, bool)) or obj is None:
-        return obj
-    # Fallback: stringify unknown types and scrub.
-    return _scrub_string(repr(obj))
 
 
 class Telemetry:
@@ -158,7 +86,7 @@ class Telemetry:
             "pid": self.pid,
         }
         if payload:
-            for k, v in _redact(payload).items():
+            for k, v in redact(payload).items():
                 record[f"payload_{k}" if k in _RESERVED else k] = v
 
         self._ring.append(record)

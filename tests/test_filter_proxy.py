@@ -287,12 +287,7 @@ def test_proxy_filters_listing_but_passes_through(tmp_path, monkeypatch):
 
 
 def _listeners(port: int) -> list[str]:
-    out = subprocess.run(
-        ["lsof", "-tiTCP:127.0.0.1", "-sTCP:LISTEN"],
-        capture_output=True, text=True,
-    )
-    # lsof has no per-port listen filter together with -t on all macOS
-    # versions; match the port via a second pass.
+    # lsof has no per-port listen filter together with -t on all macOS versions.
     holders = subprocess.run(
         ["lsof", "-nP", "-sTCP:LISTEN"],
         capture_output=True, text=True,
