@@ -132,6 +132,30 @@ decision, 2026-11-26) with a **parent-side token broker**:
   4. Confirm `instructions` is accepted. If it is refused, switch
      `system → developer` (one line in `chatgpt_responses.py`).
 
+### Live results (2026-11-26, operator account)
+
+- **Sign-in:** registered with an issued client id; `eligible=true`
+  (`chatgpt.tokens.use.direct` granted).
+- **`spark run openai`:** ready in 0.8 s. `/v1/models` answered locally in
+  under 1 ms with 10 plan models.
+- **`instructions`:** accepted, and replies honoured the system rules (terse,
+  at most 15 lines).
+- **Symbiote-shaped requests** (`temperature` and `max_tokens` dropped; no
+  retries, errors, or translation gaps):
+
+  | Model | Total | TTFB | Output tokens |
+  |---|---|---|---|
+  | `gpt-6.1-terra` | 5.1 s | 0.87 s | 206 |
+  | `gpt-6.2-sol` | 5.3 s | 0.77 s | 198 |
+  | `gpt-6-luna` | 6.6 s | 1.35 s | 274 |
+
+  All run at about 40 tok/s. Coaching replies fit 15 s with room to spare.
+  **An 8000-token compile (about 200 s) can exceed Symbiote's 180 s timeout**,
+  and the length cannot be capped because SIWC rejects `max_output_tokens`.
+  Flagged to the operator.
+- **Default model:** `gpt-6-luna` (operator choice). It is listed first in
+  `/v1/models` (`data[0].id`).
+
 ## 7. Deferred
 
 - Streaming Chat Completions translation (`stream: true` → chunks).

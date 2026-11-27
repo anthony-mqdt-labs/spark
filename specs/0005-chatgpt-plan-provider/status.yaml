@@ -1,7 +1,7 @@
 id: "0005"
 slug: "chatgpt-plan-provider"
 title: "ChatGPT plan provider: Sign in with ChatGPT, Chat Completions to Responses"
-state: "merged"   # on main; live sign-in pending
+state: "verified"
 owner: "operator"
 created: "2026-11-26"
 updated: "2026-11-26"
@@ -38,8 +38,7 @@ paths:
   - "src/spark/config/schema.py"
   - "tests/test_chatgpt_provider.py"
 
-remaining:
-  - >
-    Live: spark login openai, set remote_model, spark run openai, then one
-    request in Symbiote's shape. Confirm instructions are accepted and the
-    reply time is under 15 s.
+live_verified: "2026-11-26"   # operator sign-in; eligible; three models measured
+default_model: "gpt-6-luna"   # operator choice; in the user registry entry, not the repo
+
+remaining: []

@@ -7,24 +7,11 @@ gets deleted from this file rather than annotated. Overwrite at session end.
 **State, 2026-11-26.** `main` is the only branch. The hardening passes and spec
 0004 (hosted providers: OpenRouter and DeepSeek behind a key-injecting loopback
 proxy) are all merged into `main`, as is spec 0005 (ChatGPT plan via Sign in
-with ChatGPT, with a supervisor-side token broker). 677 tests pass.
+with ChatGPT, with a supervisor-side token broker). 679 tests pass. The
+ChatGPT plan provider is live-verified (operator signed in, 2026-11-26), with
+default model `gpt-6-luna`.
 
 ## Do next — concrete, unblocked
-
-0. **ChatGPT plan provider (spec 0005): live sign-in.** It needs the operator's
-   browser:
-   1. Run `spark login openai`. Login itself enforces the
-      `chatgpt.tokens.use.direct` scope.
-   2. Set `remote_model` in `~/.local/share/spark/models/openai.toml` to a
-      **fast** model from the printed list.
-   3. Run `spark run openai` (port 8102), then send one request with Symbiote's
-      exact shape (`SYMBIOTE-LLM-CONTRACT.md`).
-   4. Confirm two things:
-      - `instructions` is accepted (if not, map `system` to a `developer` input
-        item in `shims/chatgpt_responses.py`);
-      - a ~700-token reply lands under 15 s.
-
-   Then point Symbiote at `http://127.0.0.1:8102/v1`.
 
 1. **Live smoke test of the hosted providers (spec 0004, P6).** It needs the
    operator's keys:
@@ -37,6 +24,13 @@ with ChatGPT, with a supervisor-side token broker). 677 tests pass.
    `specs/0004-*/status.yaml` `remaining: []`.
 
 ## Awaiting an operator decision
+
+- **Symbiote course compilation can outrun its timeout on the ChatGPT plan.**
+  Plan models measured about 40 tok/s (2026-11-26). An 8000-token compile would
+  take about 200 s against Symbiote's 180 s timeout. spark cannot cap the
+  length: SIWC rejects `max_output_tokens`. Options: raise Symbiote's compile
+  timeout to about 240 s, or keep compiled slices well under 7000 tokens.
+  Coaching replies (200–300 tokens, about 5–7 s) are fine.
 
 - **Four entries assert weights that are gone:** `minicpm5-2b-8bit`,
   `ornith-1.5-9b-mlx-6bit`, `ternary-bonsai-2-27b-mlx-2bit`, and
