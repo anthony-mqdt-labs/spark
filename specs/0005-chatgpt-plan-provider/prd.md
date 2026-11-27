@@ -59,7 +59,7 @@ Back to Chat Completions: the `output_text` deltas are concatenated into
     `client_id=dynamic_agent_client` the first time. The callback returns an
     issued `client_id` (`oaiapp_…`); save that, never `dynamic_agent_client`.
   - Every attempt sends `agent_name_hint` (first registration only),
-    `ext_agent_host_id` (stable per host), PKCE S256, `state`, `nonce`,
+    `ext_agent_host_id` (stable per host; must be `urn:uuid:<UUIDv4>`, `urn:ietf:params:oauth:jwk-thumbprint:…`, or `did:key:…`, so spark uses `urn:uuid:`; a bare random string is rejected with `invalid_authorize_request`), PKCE S256, `state`, `nonce`,
     `resource=https://api.openai.com/v1`, and the scopes
     `openid profile email offline_access resource.invoke chatgpt.tokens.use.direct`.
   - The callback must be `http://127.0.0.1:<port>/auth/callback`: port 1455 at

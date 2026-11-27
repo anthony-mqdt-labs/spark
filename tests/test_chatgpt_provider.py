@@ -110,6 +110,23 @@ class FakeOpenAI:
                     )
                 elif u.path == "/api/accounts/authorize":
                     outer.authz.append(q)
+                    host = q.get("ext_agent_host_id", "")
+                    if not host.startswith(
+                        ("urn:uuid:", "did:key:", "urn:ietf:params:oauth:jwk-thumbprint:")
+                    ):
+                        # What the real endpoint returned for a bare random id.
+                        self._send(
+                            400,
+                            {
+                                "error": {
+                                    "message": "Invalid authorize request",
+                                    "type": "invalid_request_error",
+                                    "param": "ext_agent_host_id",
+                                    "code": "invalid_authorize_request",
+                                }
+                            },
+                        )
+                        return
                     code = outer._next("code")
                     outer.codes[code] = q
                     back = {"state": q["state"] + ("x" if outer.tamper_state else "")}
@@ -1000,3 +1017,27 @@ def test_supervisor_brokers_tokens_to_a_real_child_and_survives_restart(
     for tok in fake.access | fake.live_refresh | fake.spent_refresh:
         assert tok not in seen["env"]  # ...and no token rode in env or argv
         assert tok not in server_log
+
+
+def test_host_id_is_a_documented_urn_uuid(fake, store, lock):
+    import re
+    import uuid as _uuid
+
+    _login(fake, store, lock)
+    host = fake.authz[0]["ext_agent_host_id"]
+    assert re.fullmatch(
+        r"urn:uuid:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}", host
+    )
+    assert _uuid.UUID(host[len("urn:uuid:") :]).version == 4
+
+
+def test_legacy_invalid_host_id_is_replaced_not_reused(fake, store, lock):
+    from spark.secrets.oauth import Session, save_session
+
+    spec = fake.spec()
+    with session_lock(lock):
+        save_session(store, spec, Session(client_id=fake.issued, host_id="kZ3_qP0aV-8sXc1mNb2LwQ"))
+    _login(fake, store, lock, spec)  # would 400 at authorize if the bare id were reused
+    with session_lock(lock):
+        saved = load_session(store, spec, "openai")
+    assert saved.host_id.startswith("urn:uuid:") and saved.refresh_token

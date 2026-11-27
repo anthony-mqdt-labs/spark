@@ -30,6 +30,7 @@ import secrets as pysecrets
 import threading
 import time
 import urllib.parse
+import uuid
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -288,6 +289,22 @@ def ensure_access_token(
 
 
 # --- login -----------------------------------------------------------------------
+#: Host-ID forms OpenAI accepts (token-sharing overview, "A client vs. an agent host").
+_HOST_ID_PREFIXES = ("urn:uuid:", "urn:ietf:params:oauth:jwk-thumbprint:", "did:key:")
+
+
+def new_host_id() -> str:
+    """Stable per-host id: ``urn:uuid:`` + a hyphenated UUIDv4, the documented
+    supported form. ponytail: the RFC 9278 JWK-thumbprint form is "recommended"
+    but needs a keypair, and OpenAI does not verify key possession; switch if
+    that changes."""
+    return f"urn:uuid:{uuid.uuid4()}"
+
+
+def valid_host_id(host_id: str) -> bool:
+    return host_id.startswith(_HOST_ID_PREFIXES) and len(host_id) > len("urn:uuid:")
+
+
 def _b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
 
@@ -412,7 +429,9 @@ def login(
             prior = None  # unreadable session: start over
     registering = prior is None or not prior.client_id
     client_id = spec.registration_client_id if registering else prior.client_id
-    host_id = prior.host_id if prior and prior.host_id else pysecrets.token_urlsafe(16)
+    # Reuse the persisted host id; replace one that predates the documented format
+    # (an early build sent a bare random string, which OpenAI rejects).
+    host_id = prior.host_id if prior and valid_host_id(prior.host_id) else new_host_id()
     issuer = str(discovery(spec)["issuer"])
     verifier, challenge = pkce_pair()
     state, nonce = pysecrets.token_urlsafe(24), pysecrets.token_urlsafe(24)
