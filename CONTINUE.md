@@ -6,8 +6,7 @@ gets deleted from this file rather than annotated. Overwrite at session end.
 
 **State, 2026-11-26.** `main` is the only branch. The hardening passes and spec
 0004 (hosted providers: OpenRouter and DeepSeek behind a key-injecting loopback
-proxy) are all merged into `main`. `main` is ahead of `origin/main` by the 0004
-work and this docs pass: push on the operator's word. 626 tests pass.
+proxy) are all merged into `main`. 626 tests pass.
 
 ## Do next — concrete, unblocked
 
@@ -60,7 +59,7 @@ work and this docs pass: push on the operator's word. 626 tests pass.
 
 ## Adjacent repos
 
-- **banter:** in sync with `origin/main`. Spec 0028 is still `in-flight`, and its
+- **banter:** spec 0028 is still `in-flight`, and its
   recorded follow-up stands: the Rust `backend-spark` adapter does not yet read the
   persisted endpoint record (`python/.banter-endpoint.json`). It keeps its
   environment contract and the 8095 default. See
