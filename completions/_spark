@@ -16,6 +16,8 @@ _spark() {
       'catalog:Print the live model catalog'
       'forget:Remove a model from the registry'
       'secret:Manage secrets (macOS Keychain)'
+      'login:Sign in with ChatGPT for a plan provider'
+      'logout:Revoke a ChatGPT plan session'
       'config:Inspect and validate configuration'
       'completion:Emit shell completion'
   )

@@ -106,6 +106,37 @@ def check_provider_base_url(v: str) -> str:
     return v.rstrip("/")
 
 
+class OAuthSpec(_Strict):
+    """Sign in with ChatGPT (SIWC): OpenAI's sanctioned plan-usage OAuth (spec 0005).
+
+    Every endpoint and scope is data. The flow lives in ``spark.secrets.oauth``;
+    the session (tokens + issued client id) lives in one Keychain entry.
+    """
+
+    discovery_url: str
+    authorize_url: str
+    token_url: str
+    # First-time registration entrypoint; the callback returns the real client id.
+    registration_client_id: str = "dynamic_agent_client"
+    agent_name: str = "spark"
+    scopes: list[str]
+    resource: str
+    # Scope that proves the account may spend plan usage; login refuses without it.
+    required_scope: str = "chatgpt.tokens.use.direct"
+    redirect_port: int = Field(1455, ge=1, le=65535)
+    session_secret: str
+    login_timeout_s: float = Field(300.0, gt=0)
+    # Refresh when the access token has less than this left.
+    refresh_margin_s: float = Field(300.0, ge=0)
+    # How often the proxy re-reads the model catalog it answers /v1/models from.
+    models_refresh_s: float = Field(600.0, gt=0)
+
+    @field_validator("discovery_url", "authorize_url", "token_url", "resource")
+    @classmethod
+    def _tls(cls, v: str) -> str:
+        return check_provider_base_url(v)
+
+
 class DetectSpec(_Strict):
     """How to detect a runtime's presence and version."""
 
@@ -174,6 +205,9 @@ class ServerSpec(_Strict):
     provider_auth_check_path: str = "/models"
     # Upstream socket timeout; reasoning models can stall long between tokens.
     provider_timeout_s: float = Field(600.0, gt=0)
+    # Set for ChatGPT-plan providers: OAuth session instead of a static API key,
+    # and Chat Completions are translated to the Responses API (spec 0005).
+    provider_oauth: OAuthSpec | None = None
 
     @field_validator("binary")
     @classmethod

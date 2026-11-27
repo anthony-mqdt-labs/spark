@@ -1,0 +1,45 @@
+id: "0005"
+slug: "chatgpt-plan-provider"
+title: "ChatGPT plan provider: Sign in with ChatGPT, Chat Completions to Responses"
+state: "merged"   # on main; live sign-in pending
+owner: "operator"
+created: "2026-11-26"
+updated: "2026-11-26"
+
+verifier:
+  kind: "pytest"
+  command: ".venv/bin/python -m pytest tests/test_chatgpt_provider.py -q"
+  requires_tests: true
+
+depends_on: ["0004"]
+consumers:
+  - repo: "crashcourse/symbiote"
+    contract: "SYMBIOTE-LLM-CONTRACT.md"
+external:
+  - repo: "auth.openai.com"
+    what: >
+      SIWC OAuth: authorize /api/accounts/authorize, token /api/accounts/oauth/token,
+      revoke /api/accounts/oauth/revoke. Confirmed live against the OIDC discovery
+      document on 2026-11-26.
+  - repo: "api.openai.com"
+    what: >
+      POST /v1/responses (stream required, store false, no system role or
+      sampling params) and GET /v1/models (filtered by visibility).
+
+paths:
+  - "config/runtimes/openai.toml"
+  - "src/spark/secrets/oauth.py"
+  - "src/spark/secrets/broker.py"
+  - "src/spark/runner/supervisor.py"
+  - "src/spark/shims/chatgpt_responses.py"
+  - "src/spark/shims/provider_proxy.py"
+  - "src/spark/runtimes/provider.py"
+  - "src/spark/cli/login.py"
+  - "src/spark/config/schema.py"
+  - "tests/test_chatgpt_provider.py"
+
+remaining:
+  - >
+    Live: spark login openai, set remote_model, spark run openai, then one
+    request in Symbiote's shape. Confirm instructions are accepted and the
+    reply time is under 15 s.

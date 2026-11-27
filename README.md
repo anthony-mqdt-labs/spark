@@ -5,8 +5,9 @@ machine behind one command. Type `spark`, fuzzy-tab through available models, hi
 enter — the best-optimized runtime server for that model launches. `spark download
 <hf-repo>` fetches a model and runs a multi-agent research chain to discover the
 optimal per-runtime configuration for *this* host. Hosted OpenAI-compatible APIs
-(OpenRouter, DeepSeek) are served the same way, through a loopback proxy that holds
-the API key ([§3](#common-workflows)).
+(OpenRouter, DeepSeek) and your **ChatGPT plan** (OpenAI's "Sign in with ChatGPT")
+are served the same way, through a loopback proxy that holds the credential
+([§3](#common-workflows)).
 
 > **This README is the source of truth for design intent.** It explains not just
 > *what* the code does but *why*, and — critically — documents the **integrations
@@ -89,6 +90,7 @@ preference order would warrant adjustment.
 | `ollama` | ✅ installed | Convenience daemon (attach, never own) |
 | `prism_ml` | ✅ installed | PrismML Hadamard packs via shim ([D12](#d12-prism_ml-serves-hadamard-packs-through-a-shim-not-a-fork)) |
 | `openrouter`, `deepseek` | ✅ always | Hosted APIs via key-injecting proxy ([D19](#d19-hosted-providers-are-a-proxy-not-a-relay)) |
+| `openai` | ✅ after `spark login openai` | ChatGPT plan usage via Sign in with ChatGPT ([D20](#d20-chatgpt-plan-usage-goes-through-siwc-never-codexs-private-backend)) |
 | `relay` | ✅ always | Attach to an external OpenAI-compatible URL |
 | `darkcore` | ⚠ needs `$DARKCORE_ROUTER_DIR` | Patchwork dynamic router child |
 | `vllm` | ❌ absent | Registered but **unavailable on Apple Silicon** by design |
@@ -111,6 +113,7 @@ spark list [--all]             # runnable models (default) / everything (--all)
 spark catalog [--json] [--refresh]   # the machine-readable roster (catalog.json)
 spark forget <model>           # remove a registry entry (weights untouched)
 spark secret set|ls|rm|get <name>                 # macOS Keychain vault
+spark login|logout <runtime>   # Sign in with ChatGPT (plan usage) for an OAuth provider
 spark config validate|path|show [--json]          # inspect configuration (compact; --json = full)
 spark completion zsh           # emit the zsh completion function
 spark __complete models [context] | describe <model>   # hidden: completion data
@@ -239,6 +242,41 @@ Per-request logs (model, status, latency; never content or key) land in
 OpenAI-compatible provider is a TOML file in `config/runtimes/` (copy
 `openrouter.toml`; §8 Runtimes). Remove one with `spark forget <id>`.
 
+**Use your ChatGPT plan (OpenAI).** Requests are billed to your ChatGPT plan's
+usage, not API per-token rates. This is OpenAI's sanctioned "Sign in with
+ChatGPT" for "personal projects that run locally"; spark does **not** reuse Codex
+CLI's private login ([D20](#d20-chatgpt-plan-usage-goes-through-siwc-never-codexs-private-backend)).
+
+```bash
+spark login openai            # browser sign-in; session (rotating tokens) → Keychain
+                              # prints the models your plan may use
+# pick a FAST model and set it as the default consumers see first:
+#   ~/.local/share/spark/models/openai.toml  →  remote_model = "<model>"
+spark run openai              # → http://127.0.0.1:8102/v1   (no key needed by clients)
+spark logout openai           # revoke + clear tokens (registration kept)
+```
+
+Clients send **Chat Completions**. spark translates them to OpenAI's Responses
+API under the plan's preview rules:
+- system messages become `instructions`;
+- `temperature`, `max_tokens` and similar are dropped;
+- the upstream stream is collected into one non-streamed reply.
+
+`/v1/models` is answered locally, with your `remote_model` first.
+`stream: true`, `tools`, images, and `n > 1` get a 400 naming the field: they
+are outside the current translation, and a 400 is better than a silent
+mistranslation. Errors:
+
+| Status | Meaning | Do this |
+|---|---|---|
+| 401 naming `spark login openai` | session expired, revoked, or refresh token reused | `spark login openai` |
+| 403 `subscription_sharing_user_not_eligible` | plan not eligible | check the plan in ChatGPT settings |
+| 429 `subscription_sharing_usage_limit_exceeded` | plan usage limit hit; passed through unchanged | wait; see chatgpt.com/settings/usage |
+| 400 naming a field | request outside the translation contract | drop that field |
+
+The consumer contract lives in `SYMBIOTE-LLM-CONTRACT.md`, the design in
+`specs/0005-chatgpt-plan-provider/prd.md`.
+
 **Secrets & config.** `spark secret set|ls|rm|get <name>` (Keychain; `get`
 needs `--reveal`). `spark config validate|path|show` to inspect; research
 staging lives outside it (`review`/`import`).
@@ -261,11 +299,14 @@ spark/
 │   │   ├── completion.py        # `completion zsh` + hidden `__complete`
 │   │   └── render.py            # rich tables + actionable error rendering
 │   ├── config/                  # paths.py (platformdirs/XDG), schema.py (pydantic), loader.py
-│   ├── secrets/                 # store.py (ABC + redaction), keychain.py (ctypes Security)
+│   ├── secrets/                 # store.py (ABC + redaction), keychain.py (ctypes Security),
+│   │                            #   oauth.py (Sign in with ChatGPT: login/refresh/revoke),
+│   │                            #   broker.py (supervisor→child access-token socketpair)
 │   ├── runtimes/                # base.py (Backend ABC + registry) + per-runtime adapters
 │   ├── shims/                   # standalone stdlib servers spark supervises as children:
 │   │                            #   openai_filter_proxy (mlx_lm listing), provider_proxy
-│   │                            #   (hosted APIs) run on spark's interpreter; prism_shim
+│   │                            #   (hosted APIs; chatgpt_responses = Chat→Responses
+│   │                            #   translation) run on spark's interpreter; prism_shim
 │   │                            #   on mlx-lm's. Shim-only dir: a script's dir is on
 │   │                            #   sys.path, so runtimes/mlx_lm.py would shadow mlx_lm
 │   ├── probe/                   # host.py (capability detection + cached profile)
@@ -282,8 +323,9 @@ spark/
 │   ├── research/                # types/guard/prompt/providers/chain/staging/validate
 │   ├── telemetry/               # jsonl.py (structured logging; redaction imported)
 │   └── errors.py                # typed errors carrying remediation
-├── tests/                       # pytest (~625 tests)
-├── specs/<NNNN>-<slug>/         # PRDs + status.yaml (0004: hosted providers)
+├── tests/                       # pytest (~670 tests)
+├── specs/<NNNN>-<slug>/         # PRDs + status.yaml (0004 hosted providers, 0005 ChatGPT plan)
+├── SYMBIOTE-LLM-CONTRACT.md     # what the Symbiote consumer sends/expects (drives 0005)
 ├── spikes/                      # time-boxed evaluation spikes + the portable
 │                                #   human/emotion eval skill (spikes/README.md)
 ├── bake-offs/                   # comparative model bake-offs — quality evals,
@@ -460,6 +502,20 @@ Rules enforced in code:
 - **Only path a secret takes:** vault → child process env at spawn
   (`Supervisor._child_env` via `SecretStore.resolve_env`). The launch event logs
   only which env var names were set, never values.
+- **Rotating credentials never reach a child** (spec 0005 §5). A Sign in with
+  ChatGPT refresh token is single-use and rotates on every refresh, so env
+  injection cannot carry it. Instead the supervisor's `TokenBroker`
+  (`secrets/broker.py`) owns the session and hands the proxy child short-lived
+  access tokens:
+  - The channel is an anonymous `socketpair`, passed via `pass_fds` as
+    `SPARK_TOKEN_FD`, with a fresh one for every spawn.
+  - The protocol has two operations: `get`, and `rejected` (force a refresh).
+  - The network-facing child holds at most a ≤1 h access token, never the
+    30-day refresh token, and never reads the Keychain.
+
+  Refreshes run under one `flock` (`run/locks/<session>.oauth.lock`), so
+  `spark login`, the launch gate, and any supervisor never spend the same
+  refresh token twice.
 
 `SecretStore` is an ABC; `KeychainStore` is the macOS impl. Service name is
 `spark`; secret *names* (e.g. `hf_token`) are not secret and are tracked in
@@ -534,6 +590,20 @@ Adapters and their quirks:
   8100/8101, deliberately above the local range so they never collide with a
   local server. Per-request JSONL lands in `logs/<runtime>/`. Operator steps:
   §3 "Use a hosted provider".
+- **`openai`** (ChatGPT plan, spec 0005) — the same proxy in OAuth mode, selected
+  by `[server.provider_oauth]`, where every endpoint and scope is TOML.
+  - `spark login` runs OpenAI's Sign in with ChatGPT: dynamic registration
+    (`dynamic_agent_client` → an issued `oaiapp_…` id), PKCE S256, `state` and
+    `nonce`, a `127.0.0.1:1455/auth/callback` listener, and the `iss`/`aud`/
+    `exp`/`nonce` ID-token checks. Login refuses an account without the
+    `chatgpt.tokens.use.direct` scope (`SEC_NOT_ELIGIBLE`).
+  - The proxy translates Chat Completions to `POST /v1/responses` (stream on,
+    store off), answers `/v1/models` from a cached catalog, and retries an
+    upstream 401 once after a forced refresh.
+  - Tokens come from the supervisor's `TokenBroker` over `SPARK_TOKEN_FD` (§7).
+    The child never holds the refresh token, and it exits if the supervisor
+    dies.
+  - Port 8102.
 - **`darkcore`** — spawns the patchwork dynamic router under the supervisor
   (`python -m darkcore.server` from its own uv venv, set via `$DARKCORE_ROUTER_DIR`).
   Like relay, the router resolves its own tier weights. Pure-TOML runtime (generic
@@ -693,7 +763,11 @@ The fuzzy `spark <Tab>` menu depends on a chain of files **outside this repo**:
   explicitly pinned back to loopback in its TOML.
 - Egress happens only in: `hf download`, llama `-hf`, the public model-card fetch,
   the agent CLIs, and hosted-provider proxies (verified TLS to the TOML's
-  `provider_base_url` only). Everything else (probe, launch, health) is local.
+  `provider_base_url` only), plus `auth.openai.com` for ChatGPT sign-in and token
+  refresh. Everything else (probe, launch, health) is local.
+- `spark login` briefly listens on `127.0.0.1:1455` (registration), or any free
+  loopback port (re-sign-in), for the OAuth callback. It accepts exactly one
+  `/auth/callback` with a matching `state`, then closes.
 - The provider proxy treats loopback as reachable from any browser tab. It
   requires a loopback `Host` (DNS rebinding) and `application/json` POSTs
   (forces a CORS preflight, which it never answers). It forwards only `GET`/`POST`
@@ -724,8 +798,8 @@ data dir are the contract:
 
 The port convention is part of the same contract: spark's own servers prefer
 8095 (`general.port_range = [8095, 8099]`; llama.cpp 8096, oMLX 8097, prism_ml
-8098), hosted providers 8100/8101 (outside the range, so they never take a local
-server's slot; if busy they drift into it). A taken
+8098), hosted providers 8100/8101/8102 (openrouter/deepseek/openai, outside the
+range, so they never take a local server's slot; if busy they drift into it). A taken
 preferred port still causes drift, but drift is now logged (`port_drift`) and
 published, so a consumer that reads the instance record is unaffected.
 
@@ -888,6 +962,35 @@ gets them the same lifecycle, manifest, catalog, and restart policy as a local
 server. Health stays local (`/health` on the proxy) so the 5 s probe never bills
 the API. A rejected key is checked once, before spawn: no restart can fix it.
 
+### D20. ChatGPT plan usage goes through SIWC, never Codex's private backend
+Two routes spend a ChatGPT subscription.
+
+**Codex CLI's login against `chatgpt.com/backend-api/codex`** is what most
+community proxies copy. spark refuses it:
+- OpenAI's docs say "do not point it at ChatGPT's `backend-api` endpoints";
+- it is undocumented, and its tokens carry connector scopes;
+- spark refreshing them would race Codex CLI's own single-use refresh tokens.
+
+**"Sign in with ChatGPT" token sharing** is documented. It is offered for
+"personal projects that run locally", sends inference to the public
+`api.openai.com/v1/responses`, and uses its own issued client id. spark uses it.
+
+Its preview rules shape the translation:
+- Responses only, so Chat Completions are translated;
+- no system role, so system messages become `instructions`;
+- no sampling params, so they are dropped;
+- `stream: true` is mandatory, so the stream is collected.
+
+The refresh token lives in the supervisor, not in the proxy that parses
+untrusted loopback HTTP. The proxy gets ≤1 h access tokens from a token broker
+over an inherited socketpair (§7). An earlier build let the child read the
+Keychain; that was replaced, because it put a 30-day credential in the most
+exposed process.
+
+The ID token's signature is not verified. OIDC Core §3.1.3.7(6) allows TLS
+validation in place of the signature for a token taken directly from the token
+endpoint, and verifying it would mean adding an RSA dependency.
+
 ---
 
 ## 11. Failure handling & logging contract
@@ -920,7 +1023,7 @@ result), `process_crash`, `restart_scheduled`, `process_exit` (wall time, peak R
 
 ## 12. Testing
 
-`uv run pytest` — ~625 tests, no live LLM/Keychain/network required for the suite (the
+`uv run pytest` — ~670 tests, no live LLM/Keychain/network required for the suite (the
 Keychain roundtrip test self-skips off macOS; research uses fake providers and a
 real-subprocess JSON test that needs no model). Coverage spans: config
 merge/precedence, secret redaction + name validation, Keychain roundtrip, probe
@@ -931,6 +1034,20 @@ port-pick/backoff/attach/prepare, budget math, download inference, research guar
 end to end against loopback fake upstreams (plain and self-signed TLS):
 key injection, browser-abuse guards, SSE streaming, stall timeout, redirects,
 supervisor launch and crash-restart (`tests/test_provider_proxy.py`).
+The ChatGPT-plan provider is tested against a fake OpenAI that implements the
+documented protocol (`tests/test_chatgpt_provider.py`). The suite covers:
+- PKCE-checked code exchange, registration vs re-login, and forged
+  state/nonce/issuer;
+- eligibility;
+- refresh rotation, `refresh_token_reused`, a 6-thread refresh race that must
+  spend the token once, and `earliest_refresh_at`;
+- the token broker: the protocol, that no reply carries a refresh token, a
+  static guard that the child's code cannot reach the Keychain, and a real
+  supervisor-spawned child that is served and crash-restarted through the broker
+  with no token in its environment;
+- logout/revoke;
+- Symbiote's exact request round trip, local `/v1/models` within 500 ms, 429
+  pass-through, in-stream failure mapping, and the 401 refresh-retry.
 
 Live verifications performed during development (not in the unit suite): real MLX
 model served end-to-end (observed port-fallback + crash recovery), llama.cpp GGUF
@@ -972,6 +1089,10 @@ personal tool.
 
 - **Live-verify `mlx_vlm` / `omlx` / `ollama`** adapters (logic done + unit-tested;
   only `mlx_lm` and `llama_cpp` proven with a real served model).
+- **ChatGPT plan provider (spec 0005): live sign-in + smoke** pending. Confirm
+  `instructions` is accepted and a ~700-token reply lands under Symbiote's 15 s.
+  Deferred: streaming Chat Completions translation, `tools`, ID-token signature
+  verification, `id_token_hint` to skip the account picker.
 - **Hosted providers: live smoke with real keys** pending (spec 0004 P6). Deferred
   by design: a local client token on the proxy (today any same-user process can
   spend the key), model aliasing, upstream connection pooling.

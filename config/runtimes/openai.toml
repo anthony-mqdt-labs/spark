@@ -1,0 +1,43 @@
+# OpenAI via your ChatGPT plan: "Sign in with ChatGPT" (SIWC), spec 0005.
+#
+# Requests are billed to the ChatGPT plan's usage, not API per-token rates. This
+# is OpenAI's sanctioned path for "personal projects that run locally"; it is NOT
+# Codex CLI's private chatgpt.com/backend-api route.
+#   spark login openai      # one-time browser sign-in; session kept in the Keychain
+#   spark run openai        # → http://127.0.0.1:8102/v1  (Chat Completions, no key)
+# Consumers send Chat Completions; the proxy translates to the Responses API
+# (system → instructions, sampling params dropped, stream collected).
+name = "openai"
+description = "ChatGPT plan usage (Sign in with ChatGPT) via spark's loopback proxy."
+model_format = "any"
+requires_local_weights = false
+install_hint = "Nothing to install. Sign in: spark login openai"
+
+[detect]
+binary = "true"
+version_args = []
+
+[server]
+provider_base_url = "https://api.openai.com/v1"
+provider_timeout_s = 600.0
+openai_compatible = true
+default_port = 8102     # hosted providers sit just above the local range [8095, 8099]
+health_path = "/health"
+# The child refreshes its token and loads the model catalog before serving.
+ready_timeout_s = 45.0
+
+[server.provider_oauth]
+# Endpoints verified against developers.openai.com/siwc/token-sharing-open-source (2026-11-26).
+discovery_url = "https://auth.openai.com/.well-known/openid-configuration"
+authorize_url = "https://auth.openai.com/api/accounts/authorize"
+token_url = "https://auth.openai.com/api/accounts/oauth/token"
+registration_client_id = "dynamic_agent_client"
+agent_name = "spark"
+scopes = ["openid", "profile", "email", "offline_access", "resource.invoke", "chatgpt.tokens.use.direct"]
+resource = "https://api.openai.com/v1"
+required_scope = "chatgpt.tokens.use.direct"
+redirect_port = 1455    # first registration; later sign-ins may use any free port
+session_secret = "openai_chatgpt_session"
+login_timeout_s = 300.0
+refresh_margin_s = 300.0
+models_refresh_s = 600.0

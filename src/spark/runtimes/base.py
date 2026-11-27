@@ -128,6 +128,12 @@ class Backend:
     def secret_env_map(self) -> dict[str, str]:
         return dict(self.rt.server.secret_env)
 
+    def token_broker(self, secrets):
+        """A parent-side broker that hands the child short-lived tokens over an
+        inherited socket (``spark.secrets.broker``), or None. Only for
+        credentials that rotate, which env injection cannot carry."""
+        return None
+
     def extra_env(self) -> dict[str, str]:
         return dict(self.rt.server.env)
 

@@ -23,6 +23,7 @@ from .completion import complete_command, completion_command
 from .config_cmd import config_group
 from .context import build_context
 from .doctor import doctor_command
+from .login import login_command, logout_command
 from .download import download_command
 from .render import console, render_error
 from .research import research_command
@@ -279,6 +280,8 @@ cli.add_command(catalog_command)
 cli.add_command(forget_command)
 cli.add_command(adopt_command)
 cli.add_command(secret_group)
+cli.add_command(login_command)
+cli.add_command(logout_command)
 cli.add_command(config_group)
 cli.add_command(completion_command)
 cli.add_command(complete_command)

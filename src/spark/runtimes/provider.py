@@ -8,6 +8,13 @@ consumer never sees the upstream URL or the key.
 
 ``prepare`` is the fail-fast gate: a missing or rejected key is an operator
 error that no restart can fix, so it fails before anything is spawned.
+
+ChatGPT-plan runtimes (``[server.provider_oauth]``, spec 0005) have no static
+key. The gate checks the Keychain OAuth session, refreshing it under the
+session lock if it is near expiry. ``token_broker`` then keeps the rotating
+refresh token in the supervisor, and the proxy child receives short-lived
+access tokens over an inherited socketpair (spec 0005 §5). The child never
+holds a refresh token and never reads the Keychain.
 """
 
 from __future__ import annotations
@@ -38,7 +45,28 @@ class ProviderBackend(Backend):
         return True  # the shim adopts spark's pre-bound listen socket
 
     @property
+    def oauth(self):
+        return self.rt.server.provider_oauth
+
+    def secret_env_map(self) -> dict[str, str]:
+        # OAuth sessions rotate: tokens come from the broker, never the env.
+        return {} if self.oauth else super().secret_env_map()
+
+    def token_broker(self, secrets):
+        if not self.oauth:
+            return None
+        from ..config.paths import resolve_paths
+        from ..secrets.broker import TokenBroker
+        from ..secrets.oauth import oauth_lock_path
+
+        return TokenBroker(
+            secrets, self.oauth, self.name, oauth_lock_path(resolve_paths(), self.oauth)
+        )
+
+    @property
     def secret_name(self) -> str:
+        if self.oauth:
+            return self.oauth.session_secret
         name = self.rt.server.secret_env.get(KEY_ENV, "")
         if not name:
             raise ConfigError(
@@ -61,6 +89,18 @@ class ProviderBackend(Backend):
 
     def build_launch_cmd(self, entry: ModelEntry, host: str, port: int) -> list[str]:
         s = self.rt.server
+        oauth_args = (
+            [
+                "--oauth-runtime",
+                self.name,
+                "--default-model",
+                entry.remote_model,
+                "--models-refresh-s",
+                str(self.oauth.models_refresh_s),
+            ]
+            if self.oauth
+            else []
+        )
         return [
             sys.executable,
             str(_shim()),
@@ -74,9 +114,13 @@ class ProviderBackend(Backend):
             str(s.provider_timeout_s),
             "--component",
             self.name,
+            *oauth_args,
         ]
 
     def prepare(self, entry: ModelEntry, *, secrets=None) -> None:
+        if self.oauth:
+            self._prepare_oauth(secrets)
+            return
         name = self.secret_name
         set_key = f"spark secret set {name}"
         if secrets is None or not secrets.exists(name):
@@ -108,6 +152,21 @@ class ProviderBackend(Backend):
         # say nothing against the key — launch, and leave a trace.
         level = "info" if 200 <= status < 300 else "warn"
         log.emit(level, "provider", "auth_check", runtime=self.name, status=status)
+
+    def _prepare_oauth(self, secrets) -> None:
+        from ..config.paths import resolve_paths
+        from ..secrets.oauth import ensure_access_token, oauth_lock_path
+
+        spec = self.oauth
+        if secrets is None or not secrets.exists(spec.session_secret):
+            raise SecretNotFoundError(
+                f"Not signed in to ChatGPT for '{self.name}'.",
+                remediation=[f"Sign in (opens a browser): spark login {self.name}", "Then retry."],
+                context={"runtime": self.name},
+            )
+        # Raises ProviderAuthError naming `spark login` when the session is dead.
+        ensure_access_token(secrets, spec, self.name, oauth_lock_path(resolve_paths(), spec))
+        get_telemetry().info("provider", "oauth_session_ok", runtime=self.name)
 
     def _auth_check(self, key: str) -> int:
         s = self.rt.server

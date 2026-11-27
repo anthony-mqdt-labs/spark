@@ -9,9 +9,10 @@ A wrapper that orchestrates already-installed LLM inference runtime CLIs
 (`mlx_lm.server`, `mlx_vlm.server`, `omlx`, `llama-server`, `ollama`, plus the
 prism/darkcore children) via subprocess. It also fronts hosted OpenAI-compatible
 APIs (OpenRouter, DeepSeek) through its own stdlib loopback proxy, which injects
-the Keychain-held key (spec 0004). spark's own venv is intentionally tiny and
-**never imports mlx/vllm/llama**, which keeps it off the system-Python wheel-lag
-treadmill.
+the Keychain-held key (spec 0004), and the operator's ChatGPT plan via OpenAI's
+Sign in with ChatGPT, with Chat Completions translated to Responses (spec 0005).
+spark's own venv is intentionally tiny and **never imports mlx/vllm/llama**, which
+keeps it off the system-Python wheel-lag treadmill.
 
 ## Hard rules
 - **Config is data, not code.** Launch flags, runtime defs, defaults, and the
@@ -19,8 +20,14 @@ treadmill.
   reads a validated `SparkConfig`. Never hardcode a runtime flag in `src/`.
 - **Secrets never touch disk-as-text, argv, logs, or LLM prompts.** Backend is the
   macOS Keychain via Security.framework (ctypes, never the `security` CLI, which
-  puts values on argv; README D2). Secret values are read with getpass/stdin, passed
-  to child processes via env only, and run through the telemetry redaction filter.
+  puts values on argv; README D2). Secret values are read with getpass/stdin (or
+  obtained by `spark login`'s OAuth flow), and every value is registered with the
+  telemetry redaction filter. **Child processes never read the Keychain.**
+  - **Static secrets** (API keys, `hf_token`) reach a child via env only.
+  - **Rotating credentials** (OAuth refresh tokens, spec 0005 §5) never reach a
+    child at all. The supervisor's `TokenBroker` keeps the session and hands the
+    child short-lived access tokens over an inherited anonymous socketpair
+    (`SPARK_TOKEN_FD`). Refreshes hold `run/locks/<session>.oauth.lock`.
 - **Every fail state surfaces {what, why, do-this-next}** via a `SparkError`
   subclass carrying `remediation`. The supervisor attempts bounded restart with
   backoff before terminal failure.

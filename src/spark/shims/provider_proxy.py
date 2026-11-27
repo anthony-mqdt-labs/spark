@@ -17,7 +17,17 @@ Responses stream (``read1``), never buffer: time-to-first-token is preserved
 for ``stream: true``. Health is local (``GET /health``) so the supervisor's
 5-second probe never hits the paid upstream.
 
-Runs under spark's own interpreter. Stdlib only, plus spark's telemetry.
+Two auth modes:
+* **API key** (OpenRouter, DeepSeek): a static key from ``SPARK_PROVIDER_API_KEY``.
+* **ChatGPT plan** (``--oauth-runtime``, spec 0005): short-lived access tokens
+  from the supervisor's token broker over the inherited ``SPARK_TOKEN_FD``
+  socketpair (``spark.secrets.broker``). This process never holds the
+  rotating refresh token and never reads the Keychain. In this mode ``/v1/models`` is answered locally from a cached catalog,
+  ``/v1/chat/completions`` is translated to the Responses API
+  (``chatgpt_responses``), ``/v1/responses`` passes through, and an upstream
+  401 gets one forced refresh and one retry.
+
+Runs under spark's own interpreter. Stdlib only, plus spark's own modules.
 """
 
 from __future__ import annotations
@@ -36,6 +46,15 @@ import urllib.parse
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from spark.errors import ProviderAuthError, SparkError
+from spark.shims.chatgpt_responses import (
+    ResponseCollector,
+    TranslationError,
+    chat_to_responses,
+    error_status,
+    models_payload,
+    to_chat_completion,
+)
 from spark.shims.openai_filter_proxy import _HOP_HEADERS, MAX_BODY_BYTES, _adopted_server
 
 KEY_ENV = "SPARK_PROVIDER_API_KEY"
@@ -94,6 +113,46 @@ def _peek(body: bytes | None) -> tuple[str, bool]:
         return "", False
     model = doc.get("model")
     return (model[:128] if isinstance(model, str) else ""), doc.get("stream") is True
+
+
+class _StaticKey:
+    refreshable = False
+
+    def __init__(self, key: str) -> None:
+        self.key = key
+
+    def bearer(self) -> str:
+        return self.key
+
+    def rejected(self, token: str) -> str:
+        return token
+
+
+#: Plan model catalog (OAuth mode), refreshed in the background.
+_MODELS: dict = {"ids": []}
+
+
+def _catalog_ids() -> list[str]:
+    ids = list(_MODELS["ids"])
+    default = _CFG.get("default_model") or ""
+    # Consumers (Symbiote) read data[0].id: the configured model leads.
+    return [default, *[i for i in ids if i != default]] if default else ids
+
+
+def _refresh_catalog() -> None:
+    from spark.secrets.oauth import list_models
+
+    try:
+        ids = list_models(_CFG["base_url"], _CFG["auth"].bearer(), _CFG["runtime"])
+    except SparkError as exc:
+        _log("warn", "catalog_refresh_failed", error_type=type(exc).__name__, code=exc.code)
+        return
+    _MODELS["ids"] = ids
+    _log("info", "catalog_refreshed", models=len(ids))
+
+
+def _base_path() -> str:
+    return urllib.parse.urlsplit(_CFG["base_url"]).path.rstrip("/")
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -167,23 +226,82 @@ class _Handler(BaseHTTPRequestHandler):
             rec["req_bytes"] = len(body)
             rec["model"], rec["stream"] = _peek(body)
 
-        headers = {k: v for k, v in self.headers.items() if k.lower() not in _DROP_REQUEST_HEADERS}
-        headers["Authorization"] = f"Bearer {_CFG['key']}"
-        headers["Accept-Encoding"] = "identity"
+        if _CFG.get("oauth"):
+            if self.command == "GET" and path == "/v1/models":
+                rec.update(status=200, outcome="models_local")
+                self._json(200, models_payload(_catalog_ids()))
+                return
+            if self.command == "POST" and path == "/v1/chat/completions":
+                self._chat_via_responses(body or b"", rec)
+                return
+            if path != "/v1/responses":
+                rec.update(status=404, outcome="route_not_offered")
+                self._error(
+                    404,
+                    "the ChatGPT plan provider offers /v1/models, /v1/chat/completions "
+                    "and /v1/responses only",
+                )
+                return
+        self._forward(split, body, rec)
 
-        conn, base_path = open_upstream(_CFG["base_url"], _CFG["timeout_s"])
-        target = base_path + path[len("/v1") :] + (f"?{split.query}" if split.query else "")
-        t_send = time.monotonic()
+    # -- upstream -------------------------------------------------------------
+    def _auth_failed(self, exc: SparkError, rec: dict) -> None:
+        if isinstance(exc, ProviderAuthError):
+            rec.update(status=401, outcome="auth_failed", code=exc.code)
+            hint = exc.remediation[0] if exc.remediation else ""
+            self._error(401, f"{exc.message} {hint}".strip())
+        else:
+            rec.update(status=502, outcome="auth_unavailable", code=exc.code)
+            self._error(502, exc.message)
+
+    def _send(self, method: str, target: str, body: bytes | None, headers: dict, rec: dict):
+        """(conn, resp), or None after an error response was written. An
+        upstream 401 gets one forced refresh and one retry (OAuth mode only)."""
+        auth = _CFG["auth"]
         try:
-            conn.request(self.command, target, body=body, headers=headers)
-            resp = conn.getresponse()
-        except (OSError, http.client.HTTPException, ValueError) as exc:
-            # ValueError: http.client refusing a malformed header value.
-            conn.close()
-            rec.update(status=502, outcome="upstream_unreachable", error_type=type(exc).__name__)
-            self._error(502, f"provider unreachable ({type(exc).__name__})")
+            token = auth.bearer()
+        except SparkError as exc:
+            self._auth_failed(exc, rec)
+            return None
+        for attempt in (1, 2):
+            headers["Authorization"] = f"Bearer {token}"
+            conn, _ = open_upstream(_CFG["base_url"], _CFG["timeout_s"])
+            t_send = time.monotonic()
+            try:
+                conn.request(method, target, body=body, headers=headers)
+                resp = conn.getresponse()
+            except (OSError, http.client.HTTPException, ValueError) as exc:
+                # ValueError: http.client refusing a malformed header value.
+                conn.close()
+                rec.update(
+                    status=502, outcome="upstream_unreachable", error_type=type(exc).__name__
+                )
+                self._error(502, f"provider unreachable ({type(exc).__name__})")
+                return None
+            rec["ttfb_ms"] = round((time.monotonic() - t_send) * 1000, 1)
+            if resp.status == 401 and attempt == 1 and auth.refreshable:
+                resp.read()
+                conn.close()
+                try:
+                    token = auth.rejected(token)
+                except SparkError as exc:
+                    self._auth_failed(exc, rec)
+                    return None
+                rec["auth_retried"] = True
+                continue
+            return conn, resp
+        raise AssertionError("unreachable")  # the loop always returns
+
+    def _forward(self, split: urllib.parse.SplitResult, body: bytes | None, rec: dict) -> None:
+        headers = {k: v for k, v in self.headers.items() if k.lower() not in _DROP_REQUEST_HEADERS}
+        headers["Accept-Encoding"] = "identity"
+        target = (
+            _base_path() + split.path[len("/v1") :] + (f"?{split.query}" if split.query else "")
+        )
+        sent_req = self._send(self.command, target, body, headers, rec)
+        if sent_req is None:
             return
-        rec["ttfb_ms"] = round((time.monotonic() - t_send) * 1000, 1)
+        conn, resp = sent_req
         rec["status"] = resp.status
         sent = 0
         try:
@@ -206,6 +324,78 @@ class _Handler(BaseHTTPRequestHandler):
             rec["resp_bytes"] = sent
             conn.close()
 
+    def _chat_via_responses(self, body: bytes, rec: dict) -> None:
+        """Chat Completions in → Responses (stream) upstream → one chat.completion out."""
+        try:
+            req, dropped = chat_to_responses(json.loads(body or b"null"))
+        except ValueError as exc:  # TranslationError is a ValueError, as is bad JSON
+            param = exc.param if isinstance(exc, TranslationError) else "body"
+            rec.update(status=400, outcome="translation_refused", param=param)
+            self._error(400, f"{param}: {exc}")
+            return
+        rec.update(translated=True, dropped=dropped)
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        sent_req = self._send(
+            "POST", _base_path() + "/responses", json.dumps(req).encode(), headers, rec
+        )
+        if sent_req is None:
+            return
+        conn, resp = sent_req
+        col = ResponseCollector()
+        try:
+            if resp.status != 200:
+                # Pre-stream refusal: pass it through unchanged (a usage-limit 429
+                # must stay 429 so the consumer goes offline and keeps checking).
+                raw = resp.read(1 << 20)
+                rec.update(status=resp.status, outcome="upstream_refused")
+                try:
+                    err = json.loads(raw).get("error") or {}
+                except (ValueError, AttributeError):
+                    err = {}
+                if isinstance(err, dict) and err.get("code"):
+                    rec["code"] = err["code"]
+                    if err["code"] == "subscription_sharing_unsupported_capability":
+                        # A field spark should have dropped: a translation bug.
+                        _log("error", "translation_gap", param=err.get("param"), dropped=dropped)
+                self.send_response(resp.status)
+                self.send_header(
+                    "Content-Type", resp.getheader("Content-Type") or "application/json"
+                )
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+                return
+            for line in iter(resp.readline, b""):
+                col.feed_line(line.decode("utf-8", "replace"))
+                if col.done:
+                    break
+            col.close()
+        except (OSError, http.client.HTTPException) as exc:
+            rec.update(status=502, outcome="stream_aborted", error_type=type(exc).__name__)
+            self._error(502, f"provider stream aborted ({type(exc).__name__})")
+            return
+        finally:
+            conn.close()
+        if col.error is not None:
+            status = error_status(col.error)
+            rec.update(status=status, outcome="response_failed", code=col.error.get("code"))
+            if col.error.get("code") == "subscription_sharing_unsupported_capability":
+                _log("error", "translation_gap", param=col.error.get("param"), dropped=dropped)
+            self._json(status, {"error": col.error})
+            return
+        if not col.done:
+            rec.update(status=502, outcome="stream_incomplete")
+            self._error(502, "provider stream ended before response.completed")
+            return
+        out = to_chat_completion(req["model"], col.text, col.usage, col.finish, rec["request_id"])
+        rec.update(
+            status=200,
+            outcome="ok",
+            finish=col.finish,
+            completion_tokens=out["usage"]["completion_tokens"],
+        )
+        self._json(200, out)
+
     do_GET = _handle
     do_POST = _handle
 
@@ -223,6 +413,13 @@ def _parse_args(argv=None):
     p.add_argument("--upstream", required=True, help="Provider base URL (https).")
     p.add_argument("--timeout-s", type=float, default=600.0)
     p.add_argument("--component", default="provider_proxy", help="Telemetry component name.")
+    p.add_argument(
+        "--oauth-runtime",
+        default="",
+        help="ChatGPT-plan mode: runtime whose [server.provider_oauth] session to use.",
+    )
+    p.add_argument("--default-model", default="", help="Listed first in /v1/models (OAuth mode).")
+    p.add_argument("--models-refresh-s", type=float, default=600.0)
     return p.parse_args(argv)
 
 
@@ -232,6 +429,11 @@ def _init_telemetry(component: str):
 
     session = os.environ.get("SPARK_SESSION_ID") or f"proxy-{os.getpid()}"
     return init_telemetry(resolve_paths().log_dir, session)
+
+
+def _catalog_loop(stop: threading.Event, every_s: float) -> None:
+    while not stop.wait(every_s):
+        _refresh_catalog()
 
 
 def main(argv=None) -> int:
@@ -244,9 +446,11 @@ def main(argv=None) -> int:
     _CFG.update(
         component=args.component,
         telemetry=_init_telemetry(args.component),
-        key=key,
         base_url=check_provider_base_url(args.upstream),
         timeout_s=args.timeout_s,
+        oauth=bool(args.oauth_runtime),
+        runtime=args.oauth_runtime,
+        default_model=args.default_model,
     )
     upstream_host = urllib.parse.urlsplit(args.upstream).hostname
     _log(
@@ -258,13 +462,37 @@ def main(argv=None) -> int:
         cwd=os.getcwd(),
         upstream_host=upstream_host,
         timeout_s=args.timeout_s,
+        mode="chatgpt_oauth" if args.oauth_runtime else "api_key",
         key_present=bool(key),  # presence only; "api_key" would be masked by the redactor
     )
-    if not key:
-        _log("error", "api_key_missing", env_var=KEY_ENV)
-        print(f"[provider-proxy] FATAL: {KEY_ENV} not set", file=sys.stderr, flush=True)
-        return 2
-    register_secret_value(key)
+    token_fd = os.environ.pop("SPARK_TOKEN_FD", None)
+    if args.oauth_runtime:
+        if token_fd is None or not token_fd.isdigit():
+            _log("error", "token_channel_missing")
+            print(
+                "[provider-proxy] FATAL: SPARK_TOKEN_FD not set (run via spark)",
+                file=sys.stderr,
+                flush=True,
+            )
+            return 3
+        from spark.secrets.broker import BrokerClient
+
+        auth = BrokerClient(int(token_fd))
+        _CFG["auth"] = auth
+        try:
+            auth.bearer()  # fail fast, before the supervisor sees /health
+        except SparkError as exc:
+            _log("error", "oauth_unusable", code=exc.code, error_type=type(exc).__name__)
+            print(f"[provider-proxy] FATAL: {exc.message}", file=sys.stderr, flush=True)
+            return 3
+        _refresh_catalog()
+    else:
+        if not key:
+            _log("error", "api_key_missing", env_var=KEY_ENV)
+            print(f"[provider-proxy] FATAL: {KEY_ENV} not set", file=sys.stderr, flush=True)
+            return 2
+        register_secret_value(key)
+        _CFG["auth"] = _StaticKey(key)
 
     listen_fd = os.environ.pop("SPARK_LISTEN_FD", None)
     try:
@@ -286,11 +514,20 @@ def main(argv=None) -> int:
 
     serve = threading.Thread(target=server.serve_forever, daemon=True)
     serve.start()
+    if args.oauth_runtime:
+        threading.Thread(
+            target=_catalog_loop, args=(stop, args.models_refresh_s), daemon=True
+        ).start()
     _log("info", "listening", host=args.host, port=args.port, adopted_fd=listen_fd is not None)
     print(f"[provider-proxy] http://{args.host}:{args.port}/v1 -> {upstream_host}", flush=True)
+    parent = os.getppid()
     try:
         while not stop.wait(1.0):
-            pass
+            if os.getppid() != parent:
+                # Supervisor gone (SIGKILL): an orphaned proxy would keep serving
+                # with a token nobody refreshes. Exit instead.
+                _log("warn", "parent_gone", ppid=os.getppid())
+                break
     finally:
         server.shutdown()
         serve.join(timeout=2.0)

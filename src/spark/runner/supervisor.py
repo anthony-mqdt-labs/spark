@@ -44,6 +44,7 @@ from ..errors import (
 from ..probe.host import HostProfile
 from ..registry.availability import MISSING, resolve_availability
 from ..runtimes.base import Backend
+from ..secrets.broker import TOKEN_FD_ENV
 from ..secrets.store import SecretStore
 from ..telemetry import get_telemetry
 from .ports import (  # re-export for existing importers
@@ -124,6 +125,9 @@ class Supervisor:
         self._port: int | None = None
         self._peak_rss = 0
         self._publisher: InstancePublisher | None = None
+        # Rotating-credential broker (spec 0005): owns the refresh token in this
+        # process; each spawned child gets a fresh socketpair end for access tokens.
+        self._broker = None
         self._prev_signals: dict[int, SignalHandler] = {}
         # Child stdout/stderr are redirected here (not the terminal) to keep the
         # CLI output clean; tailed on failure so the reason still surfaces.
@@ -527,6 +531,7 @@ class Supervisor:
         # descriptor: a runtime that echoes its HF_TOKEN must not put it on disk.
         pump.write(f"\n=== spawn {time.strftime('%Y-%m-%dT%H:%M:%S')} :: {' '.join(cmd)} ===\n")
         write_fd = pump.start_pipe()
+        token_chan = None
         try:
             # Preflight reserves for the first spawn. A restart has already
             # released that copy (and the old child has exited), so re-reserve
@@ -547,6 +552,13 @@ class Supervisor:
                 fd = reserved.fileno()
                 env["SPARK_LISTEN_FD"] = str(fd)
                 pass_fds = (fd,)
+            # Token channel: a new anonymous socketpair per spawn, so a restarted
+            # child never inherits a dead child's channel.
+            env.pop(TOKEN_FD_ENV, None)
+            if self._broker is not None:
+                token_chan = self._broker.new_channel()
+                env[TOKEN_FD_ENV] = str(token_chan.fileno())
+                pass_fds = (*pass_fds, token_chan.fileno())
             self._proc = subprocess.Popen(
                 cmd, env=env, stdout=write_fd, stderr=write_fd, pass_fds=pass_fds
             )
@@ -570,6 +582,8 @@ class Supervisor:
             # The child inherited a dup via pass_fds; drop the parent's copy
             # after Popen (also on failure) so a dead child never strands it.
             self._release_reservation()
+            if token_chan is not None:
+                token_chan.close()  # the child holds its own dup
 
     def _open_server_log(self):
         """Opened at first spawn — after preflight — and in append mode.
@@ -650,6 +664,9 @@ class Supervisor:
             # Preflight may have reserved the port then aborted before Popen;
             # no _spawn ran to release it, so the session must do it here.
             self._release_reservation()
+            if self._broker is not None:
+                self._broker.close()
+                self._broker = None
             self._restore_signals()
             # Whatever happened — clean stop, crash, exhausted recovery, or an
             # error before launch — a published instance must not outlive the
@@ -746,6 +763,7 @@ class Supervisor:
 
         # Pre-launch hook (pull weights, verify, etc.); may abort with remediation.
         self.backend.prepare(self.entry, secrets=self.secrets)
+        self._broker = self.backend.token_broker(self.secrets)
 
         # Attach mode: if a daemon-style backend is already serving, don't spawn.
         if self.backend.attach_if_running and self._is_healthy(url):
